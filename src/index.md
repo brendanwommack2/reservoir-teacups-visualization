@@ -14,12 +14,7 @@ const reservoirMeta = d3.csvParse(raw, d => ({
   storage: +d.storage,
   capacity: +d.capacity,
   pctFull: +d.pctFull,
-  isMock: d.isMock === "true",
-  mockReason: d.mockReason,
 }));
-
-const mockReservoirs = reservoirMeta.filter(d => d.isMock);
-const usingMockData = mockReservoirs.length > 0;
 ```
 
 ```js
@@ -154,15 +149,6 @@ display(htl.html`
 ```
 
 ```js
-if (usingMockData) {
-  display(htl.html`<p class="last-updated" style="color:#B03823;">
-    ${mockReservoirs.length} of ${reservoirMeta.length} reservoirs are showing placeholder
-    data: ${mockReservoirs.map(d => `${d.name} (${d.mockReason || "no itemId configured"})`).join("; ")}.
-  </p>`);
-}
-```
-
-```js
 // ── Tea-cup mark, as an Observable Plot custom Mark ──────────────────
 // Take rx/ry as channels (capacity and storage respectively), and
 // apply the reverse transform in render().
@@ -187,9 +173,7 @@ if (usingMockData) {
 // scaling distorts that ratio. Squaring it — (ry*ry)/(rx*rx) — reverses
 // the sqrt transform and recovers the exact linear storage/capacity
 // fraction again: whatever constant scale factor k the sqrt scale
-// applied cancels out, since (k·√s / k·√c)^2 = s/c. This is the same
-// `pp = (rys[i]*rys[i])/(rxs[i]*rxs[i])` line from the Teacup mark in
-// the shared notebook.
+// applied cancels out, since (k·√s / k·√c)^2 = s/c. 
 const CUP_BLUE = "#4650e0";
 const LABEL_NAVY = "#1d3ec1";
 
@@ -232,7 +216,7 @@ class Teacup extends Plot.Mark {
       const pct = rx > 0 ? Math.min(1, Math.max(0, (ry * ry) / (rx * rx))) : 0;
       const waterH = h * pct;
 
-      const topW = w, botW = w * 0.22;
+      const topW = w, botW = w * 0.40;
       const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
 
       const displaced = Math.hypot(x - x0, y - y0) > 3;
@@ -361,7 +345,6 @@ display(mapEl);
 
 ```js
 display(htl.html`<p class="page-footer">
-  Data through ${reservoirMeta[0]?.date ?? "—"} ·
-  ${usingMockData ? `${reservoirMeta.length - mockReservoirs.length}/${reservoirMeta.length} live, rest placeholder` : "USBR RISE, preliminary"}
+  Data through ${reservoirMeta[0]?.date ?? "—"} · USBR RISE, preliminary
 </p>`);
 ```
