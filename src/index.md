@@ -6,6 +6,7 @@ toc: false
 <link rel="stylesheet" href="./styles/App.css">
 
 ```js
+// Load reservoir metadata (name, storage, capacity) and the historical volume data
 const histVolume = await FileAttachment("./data/Reservoir-storage-volume.csv").text();
 const raw = await FileAttachment("./data/reservoirs.csv").text();
 const reservoirMeta = d3.csvParse(raw, d => ({
@@ -19,45 +20,16 @@ const reservoirMeta = d3.csvParse(raw, d => ({
 ```
 
 ```js
-function reverseRing(ring) {
-  return ring.slice().reverse();
-}
-
-function reversePolygonCoords(coords) {
-  return coords.map(reverseRing);
-}
-
-function rewindFeature(f) {
-  if (!f.geometry) return f;
-  if (d3.geoArea(f) <= 2 * Math.PI) return f;
-
-  const {type, coordinates} = f.geometry;
-  let fixed = coordinates;
-  if (type === "Polygon") {
-    fixed = reversePolygonCoords(coordinates);
-  } else if (type === "MultiPolygon") {
-    fixed = coordinates.map(reversePolygonCoords);
-  }
-  return {...f, geometry: {...f.geometry, coordinates: fixed}};
-}
-
-function rewindGeoJSON(fc) {
-  return {...fc, features: fc.features.map(rewindFeature)};
-}
+// Real geometry, exported from ArcPro. Basin and reservoir polygons were
+// pre-fixed for ring winding in R (see scripts/fix_geometry.R) and loaded
+// directly here.
+const basin = await FileAttachment("./Layers/UpperBasin_simple.geojson").json();
+const rivers = await FileAttachment("./Layers/Rivers.geojson").json();
+const reservoirShapes = await FileAttachment("./Layers/Reservoirs_simple.geojson").json();
 ```
 
 ```js
-// Upper Basin boundary is pre-simplified/fixed in R (see UpperBasin_simple.geojson).
-const basinRaw = await FileAttachment("./Layers/UpperBasin_simple.geojson").json();
-const riversRaw = await FileAttachment("./Layers/Rivers.geojson").json();
-const reservoirShapesRaw = await FileAttachment("./Layers/Reservoirs.geojson").json();
-
-const basin = basinRaw;
-const rivers = rewindGeoJSON(riversRaw);
-const reservoirShapes = rewindGeoJSON(reservoirShapesRaw);
-```
-
-```js
+// Walks any GeoJSON geometry type and calls fn(coord) on every raw coordinate pair
 function forEachCoordinate(geometry, fn) {
   if (!geometry) return;
   const {type, coordinates} = geometry;
@@ -68,6 +40,9 @@ function forEachCoordinate(geometry, fn) {
   else if (type === "GeometryCollection") geometry.geometries.forEach(g => forEachCoordinate(g, fn));
 }
 
+// Fits a projection's scale/translate to a set of feature collections by
+// projecting every coordinate and taking the pixel bounding box directly,
+// rather than relying on d3's fitExtent 
 function fitProjectionToFeatures(projection, featureCollections, [width, height], padding = 20) {
   projection.scale(1).translate([0, 0]);
 
@@ -100,6 +75,9 @@ function fitProjectionToFeatures(projection, featureCollections, [width, height]
 ```
 
 ```js
+// Nudges overlapping cup+label blocks apart (e.g. Fontenelle/Flaming Gorge)
+// using a force simulation: each point springs weakly back toward its true
+// position while a collision force keeps blocks from overlapping.
 function declutterPositions(points, {radius = 60, strength = 0.15, iterations = 300} = {}) {
   const nodes = points.map(d => ({...d, x0: d.x, y0: d.y}));
   const sim = d3.forceSimulation(nodes)
@@ -122,6 +100,12 @@ display(htl.html`
 ```
 
 ```js
+// Custom Plot mark: draws each reservoir as a tea-cup shape, filled to
+// reflect % full. rx/ry (sqrt-scaled capacity/storage) control cup SIZE
+// only. Fill level comes from the separate `pct` channel — NOT from rx/ry —
+// since the scale's non-zero range floor ([10, 34]) means rx/ry aren't
+// simple multiples of √capacity/√storage, so their ratio can't be squared
+// back into an accurate percentage.
 const CUP_BLUE = "#4650e0";
 const LABEL_NAVY = "#1d3ec1";
 
@@ -129,16 +113,18 @@ class Teacup extends Plot.Mark {
   static defaults = {fill: CUP_BLUE, stroke: null};
 
   constructor(data, options = {}) {
-    const {x, y, x0 = x, y0 = y, rx, ry} = options;
+    const {x, y, x0 = x, y0 = y, rx, ry, pct} = options;
     super(
       data,
       {
+        // scale, null means use this value as a literal pixel number
         x: {value: x, scale: null},
         y: {value: y, scale: null},
         x0: {value: x0, scale: null},
         y0: {value: y0, scale: null},
         rx: {value: rx, scale: null},
         ry: {value: ry, scale: null},
+        pct: {value: pct, scale: null},
       },
       options,
       Teacup.defaults
@@ -146,23 +132,25 @@ class Teacup extends Plot.Mark {
   }
 
   render(indices, scales, channels, dimensions, cxt) {
-    const {x: xs, y: ys, x0: x0s, y0: y0s, rx: rxs, ry: rys} = channels;
+    const {x: xs, y: ys, x0: x0s, y0: y0s, rx: rxs, ry: rys, pct: pcts} = channels;
     const data = this.data;
 
     return htl.svg`<g>${[...indices].map((i) => {
       const x = xs[i], y = ys[i];
       const x0 = x0s[i], y0 = y0s[i];
-      const rx = rxs[i], ry = rys[i];
+      const rx = rxs[i];
 
       const w = rx * 2;
       const h = w * 0.92;
 
-      const pct = rx > 0 ? Math.min(1, Math.max(0, (ry * ry) / (rx * rx))) : 0;
+      const pct = Math.min(1, Math.max(0, pcts[i]));
       const waterH = h * pct;
 
+      // Trapezoid cup shape
       const topW = w, botW = w * 0.40;
       const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
 
+      // If decluttering moved this point, draw a leader line back to its true position
       const displaced = Math.hypot(x - x0, y - y0) > 3;
       const clipId = `clip-teacup-${i}`;
 
@@ -198,6 +186,7 @@ class Teacup extends Plot.Mark {
   }
 }
 
+// Sqrt scale so cup AREA (not radius) scales linearly with capacity 
 function makeRScale(data, range = [10, 34]) {
   return d3.scaleSqrt()
     .domain([0, d3.max(data, d => d.capacity)])
@@ -211,10 +200,14 @@ const mapEl = resize((width) => {
   const height = 620;
   const padding = 20;
 
+  // Fit the projection to the basin outline, then reuse it for everything else
+  // (reservoir centroids, Plot.geo layers) so it all lines up in the same pixel space
   const projection = d3.geoMercator();
   fitProjectionToFeatures(projection, [basin], [width, height], padding);
   const path = d3.geoPath(projection);
 
+  // Join reservoir geometry with metadata (from the csv) by id,
+  // get each reservoir's pixel position via its polygon centroid
   const reservoirPoints = reservoirShapes.features
     .map(f => {
       const meta = reservoirMeta.find(r => r.id === f.properties.id);
@@ -232,6 +225,7 @@ const mapEl = resize((width) => {
     ...d,
     rx: rScale(d.capacity),
     ry: rScale(d.storage),
+    pct: d.capacity > 0 ? d.storage / d.capacity : 0,
   }));
 
   const plot = Plot.plot({
@@ -240,23 +234,27 @@ const mapEl = resize((width) => {
     margin: 0,
     projection,
     marks: [
+      // Basin outline
       Plot.geo(basin.features, {
         fill: "#ffffff",
         stroke: "#1a1a1a",
         strokeWidth: 1.5,
       }),
+      // Rivers
       Plot.geo(rivers.features, {
         fill: "none",
         stroke: "#5bb8e8",
         strokeWidth: 1.5,
       }),
+      // Reservoir waterbody outlines, drawn under the tea-cups
       Plot.geo(reservoirShapes.features, {
         fill: "#5bb8e8",
         fillOpacity: 0.6,
         stroke: "#1d3ec1",
         strokeWidth: 1,
       }),
-      new Teacup(declustered, {x: "x", y: "y", x0: "x0", y0: "y0", rx: "rx", ry: "ry"}),
+      // Tea-cups on top
+      new Teacup(declustered, {x: "x", y: "y", x0: "x0", y0: "y0", rx: "rx", ry: "ry", pct: "pct"}),
     ],
   });
 
