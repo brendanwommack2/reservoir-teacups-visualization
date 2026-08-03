@@ -2,11 +2,6 @@
 //
 // Observable Framework data loader. Runs at build time; stdout becomes
 // data/reservoirs.csv, loaded in pages via FileAttachment("./data/reservoirs.csv"),
-// exactly like ./data/RM10_water_temp.csv elsewhere in this project.
-//
-// NOTE: This loader has no mock/placeholder fallback. If any reservoir's
-// itemId is missing or its RISE fetch fails (after retries), the whole
-// build fails loudly rather than silently substituting fake numbers.
 //
 
 import {csvFormat} from "d3-dsv";

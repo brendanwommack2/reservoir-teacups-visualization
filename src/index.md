@@ -6,6 +6,7 @@ toc: false
 <link rel="stylesheet" href="./styles/App.css">
 
 ```js
+const histVolume = await FileAttachment("./data/Reservoir-storage-volume.csv").text();
 const raw = await FileAttachment("./data/reservoirs.csv").text();
 const reservoirMeta = d3.csvParse(raw, d => ({
   id: d.id,
@@ -18,11 +19,6 @@ const reservoirMeta = d3.csvParse(raw, d => ({
 ```
 
 ```js
-// ── Ring-winding fix ─────────────────────────────────────────────────
-// Uses d3.geoArea() (d3's own spherical area calc) to decide winding,
-// rather than a hand-rolled planar shoelace check. On this project's
-// large ArcPro-exported polygons, a custom planar shoelace check
-// disagreed with d3.geoArea() and silently left rings un-flipped.
 function reverseRing(ring) {
   return ring.slice().reverse();
 }
@@ -51,29 +47,17 @@ function rewindGeoJSON(fc) {
 ```
 
 ```js
-// Real geometry, exported from ArcPro. All three layers rewound
-const basinRaw = await FileAttachment("./Layers/UpperBasin.geojson").json();
+// Upper Basin boundary is pre-simplified/fixed in R (see UpperBasin_simple.geojson).
+const basinRaw = await FileAttachment("./Layers/UpperBasin_simple.geojson").json();
 const riversRaw = await FileAttachment("./Layers/Rivers.geojson").json();
 const reservoirShapesRaw = await FileAttachment("./Layers/Reservoirs.geojson").json();
 
-const basin = rewindGeoJSON(basinRaw);
+const basin = basinRaw;
 const rivers = rewindGeoJSON(riversRaw);
 const reservoirShapes = rewindGeoJSON(reservoirShapesRaw);
 ```
 
 ```js
-// ── Projection fit, independent of ring winding ─────────────────────
-// fitExtent() streams geometry through d3's clip/resample pipeline to
-// compute bounds — the same machinery that ring winding can throw off.
-// This instead projects every raw coordinate directly (bypassing clip/
-// resample entirely) and takes a plain pixel min/max, so it can't be
-// broken by winding even if a rewind pass upstream missed something.
-//
-// This fitted projection instance is handed straight to Plot.plot()
-// below (as the `projection` option) rather than letting Plot compute
-// its own fit — that keeps the geo layers and the hand-declustered
-// tea-cup positions (computed with this same instance) in the exact
-// same pixel space.
 function forEachCoordinate(geometry, fn) {
   if (!geometry) return;
   const {type, coordinates} = geometry;
@@ -116,17 +100,6 @@ function fitProjectionToFeatures(projection, featureCollections, [width, height]
 ```
 
 ```js
-// ── Declutter overlapping cup+label blocks ───────────────────────────
-// Fontenelle/Flaming Gorge (WY) and Morrow Point/Blue Mesa (CO) sit
-// close enough geographically that their true centroids collide once
-// you draw a cup + 3 lines of label text around each. Rather than
-// hardcoding pixel nudges (which breaks on resize), each node gets a
-// weak spring back to its true (x0, y0) position plus a collision
-// force that pushes overlapping blocks apart until they clear.
-//
-// Runs in plain pixel space (via the fitted projection above) before
-// the data ever reaches the Plot mark, since force-collision needs
-// real screen distances, not lon/lat degrees.
 function declutterPositions(points, {radius = 60, strength = 0.15, iterations = 300} = {}) {
   const nodes = points.map(d => ({...d, x0: d.x, y0: d.y}));
   const sim = d3.forceSimulation(nodes)
@@ -149,31 +122,6 @@ display(htl.html`
 ```
 
 ```js
-// ── Tea-cup mark, as an Observable Plot custom Mark ──────────────────
-// Take rx/ry as channels (capacity and storage respectively), and
-// apply the reverse transform in render().
-//
-// Positions (x, y, x0, y0) and sizes (rx, ry) are all pre-computed in
-// plain pixel units before this mark ever sees them — declustering and
-// the projection fit both need real pixel space, not lon/lat — so every
-// channel here is registered with `scale: null`, meaning "use this
-// value as-is, don't run it through a Plot scale." Plot.geo's own
-// `projection` (set on Plot.plot itself, using the exact same fitted
-// projection instance) puts the basin/rivers/reservoir polygons in that
-// same pixel space, so everything lines up.
-//
-// rx: reservoir CAPACITY, pushed through a sqrt ("r") scale -> cup
-//     size on screen scales with capacity the way area should, so Lake
-//     Powell visibly dwarfs Morrow Point instead of both being the same
-//     fixed-size cup.
-// ry: reservoir STORAGE, through that same sqrt scale -> a second,
-//     smaller radius.
-//
-// Naively reading fill level off ry/rx would be wrong, because sqrt
-// scaling distorts that ratio. Squaring it — (ry*ry)/(rx*rx) — reverses
-// the sqrt transform and recovers the exact linear storage/capacity
-// fraction again: whatever constant scale factor k the sqrt scale
-// applied cancels out, since (k·√s / k·√c)^2 = s/c. 
 const CUP_BLUE = "#4650e0";
 const LABEL_NAVY = "#1d3ec1";
 
@@ -185,8 +133,6 @@ class Teacup extends Plot.Mark {
     super(
       data,
       {
-        // scale: null -> take the channel value as a literal pixel
-        // number, rather than running it through a Plot x/y/r scale.
         x: {value: x, scale: null},
         y: {value: y, scale: null},
         x0: {value: x0, scale: null},
@@ -211,8 +157,6 @@ class Teacup extends Plot.Mark {
       const w = rx * 2;
       const h = w * 0.92;
 
-      // The reverse transform: recover the true linear fraction from
-      // the two sqrt-scaled radii.
       const pct = rx > 0 ? Math.min(1, Math.max(0, (ry * ry) / (rx * rx))) : 0;
       const waterH = h * pct;
 
@@ -254,9 +198,6 @@ class Teacup extends Plot.Mark {
   }
 }
 
-// Sqrt ("r") scale: capacity -> on-screen cup radius. Domain starts at
-// 0 so a hypothetical zero-capacity reservoir gets zero size; range
-// floor is non-zero so the smallest real reservoir stays legible.
 function makeRScale(data, range = [10, 34]) {
   return d3.scaleSqrt()
     .domain([0, d3.max(data, d => d.capacity)])
@@ -274,7 +215,6 @@ const mapEl = resize((width) => {
   fitProjectionToFeatures(projection, [basin], [width, height], padding);
   const path = d3.geoPath(projection);
 
-  // ── JOIN: geojson geometry (position) + csv (name/capacity/storage) ──
   const reservoirPoints = reservoirShapes.features
     .map(f => {
       const meta = reservoirMeta.find(r => r.id === f.properties.id);
@@ -298,9 +238,6 @@ const mapEl = resize((width) => {
     width,
     height,
     margin: 0,
-    // Reuse the exact same fitted projection instance used above for
-    // path.centroid(), so the geo layers and the tea-cups (positioned
-    // in raw pixels via scale: null) share one coordinate space.
     projection,
     marks: [
       Plot.geo(basin.features, {
@@ -313,12 +250,6 @@ const mapEl = resize((width) => {
         stroke: "#5bb8e8",
         strokeWidth: 1.5,
       }),
-      // ── Reservoir polygons ──────────────────────────────────────
-      // This layer draws waterbody shapes, styled to read as
-      // an extension of the river-blue used above. Drawn after
-      // rivers/basin so it sits above the basin fill, and before the
-      // tea-cups so the cups and leader lines render on top of the
-      // reservoir outlines.
       Plot.geo(reservoirShapes.features, {
         fill: "#5bb8e8",
         fillOpacity: 0.6,
