@@ -91,11 +91,96 @@ function declutterPositions(points, {radius = 60, strength = 0.15, iterations = 
 ```
 
 ```js
+// Shared color constants (mirrors --cup-blue / --label-navy / --ghost-amber
+// in App.css). Declared once here so every cup-drawing cell — the map
+// tea-cups, the system-total cup, and the historical paired cups — stays
+// in sync.
+const CUP_BLUE = "#4650e0";
+const LABEL_NAVY = "#1d3ec1";
+const GHOST_AMBER = "#c1732c";
+```
+
+```js
+// Shared trapezoid "teacup" drawer. Draws a clipped, fillable cup plus its
+// three label lines into an existing <g>. Used by both the system-total
+// cup below and the per-reservoir paired cups in the Historical Comparison
+// section, so there's one definition of what a cup looks like.
+function drawCupShape(g, {w, h, pct, color, dashed = false, label, sub}) {
+  const topW = w, botW = w * 0.40;
+  const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
+  const waterH = h * Math.min(1, Math.max(0, pct));
+  const clipId = `clip-${Math.random().toString(36).slice(2)}`;
+
+  g.append("clipPath").attr("id", clipId).append("path").attr("d", cupD);
+  g.append("rect")
+    .attr("x", -w / 2).attr("y", h - waterH).attr("width", w).attr("height", waterH)
+    .attr("fill", color).attr("fill-opacity", dashed ? 0.35 : 1)
+    .attr("clip-path", `url(#${clipId})`);
+  g.append("path")
+    .attr("d", cupD).attr("fill", "none").attr("stroke", color).attr("stroke-width", 1.5)
+    .attr("stroke-dasharray", dashed ? "3,2" : null);
+  g.append("text")
+    .attr("x", 0).attr("y", h + 15).attr("text-anchor", "middle")
+    .attr("font-size", 10).attr("font-weight", 700).attr("fill", color)
+    .text(label);
+  g.append("text")
+    .attr("x", 0).attr("y", h + 27).attr("text-anchor", "middle")
+    .attr("font-size", 9).attr("fill", color)
+    .text(sub);
+  g.append("text")
+    .attr("x", 0).attr("y", h + 39).attr("text-anchor", "middle")
+    .attr("font-size", 9).attr("font-weight", 700).attr("fill", color)
+    .text(`${Math.round(pct * 100)}% Full`);
+}
+```
+
+```js
+// System-wide totals: sum storage/capacity across all reservoirs currently
+// loaded, and a big single cup to match — same visual language as the
+// per-reservoir cups, but answering "how much water is in the system,
+// total" rather than "where is it."
+const totalStorage = d3.sum(reservoirMeta, d => d.storage);
+const totalCapacity = d3.sum(reservoirMeta, d => d.capacity);
+const systemPct = totalCapacity > 0 ? totalStorage / totalCapacity : 0;
+
+// Formats an acre-feet total in millions, e.g. 14234000 -> "14.2M"
+function formatAcFt(n) {
+  return `${(n / 1e6).toFixed(1)}M`;
+}
+
+const systemCupEl = (() => {
+  const w = 130, h = 120, topMargin = 20;
+  const svgHeight = h + 56 + topMargin;
+
+  const svg = d3.create("svg")
+    .attr("viewBox", `0 0 ${w} ${svgHeight}`)
+    .attr("width", w)
+    .attr("height", svgHeight);
+
+  drawCupShape(svg.append("g").attr("transform", `translate(${w / 2}, ${topMargin})`), {
+    w, h,
+    pct: systemPct,
+    color: CUP_BLUE,
+    label: "System Total",
+    sub: `${formatAcFt(totalStorage)} / ${formatAcFt(totalCapacity)}`,
+  });
+
+  return svg.node();
+})();
+```
+
+```js
 display(htl.html`
-  <div class="data-current">
-    Data Current as of:<br>${reservoirMeta[0]?.date ?? "—"}
+  <div class="header-row">
+    <div class="header-left">
+      <div class="data-current">
+        Data Current as of:<br>${reservoirMeta[0]?.date ?? "no data"}
+      </div>
+      <h1 class="reservoir-title">Upper Colorado River Drainage Basin</h1>
+      <div class="system-stat">${formatAcFt(totalStorage)} / ${formatAcFt(totalCapacity)} ac-ft &nbsp;—&nbsp; ${Math.round(systemPct * 100)}% Full System-Wide</div>
+    </div>
+    <div class="header-right">${systemCupEl}</div>
   </div>
-  <h1 class="reservoir-title">Upper Colorado River Drainage Basin</h1>
 `);
 ```
 
@@ -106,9 +191,6 @@ display(htl.html`
 // since the scale's non-zero range floor ([10, 34]) means rx/ry aren't
 // simple multiples of √capacity/√storage, so their ratio can't be squared
 // back into an accurate percentage.
-const CUP_BLUE = "#4650e0";
-const LABEL_NAVY = "#1d3ec1";
-
 class Teacup extends Plot.Mark {
   static defaults = {fill: CUP_BLUE, stroke: null};
 
@@ -274,7 +356,7 @@ display(mapEl);
 
 ```js
 display(htl.html`<p class="page-footer">
-  Data through ${reservoirMeta[0]?.date ?? "—"} · USBR RISE, preliminary
+  Data through ${reservoirMeta[0]?.date ?? "no data"} · USBR RISE, preliminary
 </p>`);
 ```
 
@@ -412,17 +494,16 @@ const selectedHistDate = view(historicalDateControl({dates: histDates, initial: 
 // cell prints the raw AsyncGenerator object instead of the date string.
 display(htl.html`
   <div class="hist-compare-caption">
-    Historical (amber) — <b>${selectedHistDate}</b> &nbsp;vs&nbsp; Current (blue) — <b>${reservoirMeta[0]?.date ?? "—"}</b>
+    Historical (amber) — <b>${selectedHistDate}</b> &nbsp;vs&nbsp; Current (blue) — <b>${reservoirMeta[0]?.date ?? "no data"}</b>
   </div>
 `);
 ```
 
 ```js
-// Small-multiples mark: same trapezoid teacup shape as the map, but drawn
-// as a standalone SVG per reservoir (no geo projection / decluttering needed
-// since these are laid out in a simple grid).
-const GHOST_AMBER = "#c1732c";
-
+// Small-multiples mark: same trapezoid teacup shape as the map and the
+// system-total cup, but drawn as a standalone SVG per reservoir (no geo
+// projection / decluttering needed since these are laid out in a simple
+// grid). Uses the shared drawCupShape helper.
 function drawPairedCup(container, {name, currentPct, currentStorage, currentCapacity, histPct, histVolume, histDate}) {
   const w = 90, h = 82, gap = 26;
   const totalW = w * 2 + gap;
@@ -438,47 +519,21 @@ function drawPairedCup(container, {name, currentPct, currentStorage, currentCapa
     .attr("width", totalW)
     .attr("height", svgHeight);
 
-  function cup(g, {pct, color, dashed, label, sub}) {
-    const topW = w, botW = w * 0.40;
-    const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
-    const waterH = h * Math.min(1, Math.max(0, pct));
-    const clipId = `clip-${Math.random().toString(36).slice(2)}`;
-
-    g.append("clipPath").attr("id", clipId).append("path").attr("d", cupD);
-    g.append("rect")
-      .attr("x", -w / 2).attr("y", h - waterH).attr("width", w).attr("height", waterH)
-      .attr("fill", color).attr("fill-opacity", dashed ? 0.35 : 1)
-      .attr("clip-path", `url(#${clipId})`);
-    g.append("path")
-      .attr("d", cupD).attr("fill", "none").attr("stroke", color).attr("stroke-width", 1.5)
-      .attr("stroke-dasharray", dashed ? "3,2" : null);
-    g.append("text")
-      .attr("x", 0).attr("y", h + 15).attr("text-anchor", "middle")
-      .attr("font-size", 10).attr("font-weight", 700).attr("fill", color)
-      .text(label);
-    g.append("text")
-      .attr("x", 0).attr("y", h + 27).attr("text-anchor", "middle")
-      .attr("font-size", 9).attr("fill", color)
-      .text(sub);
-    g.append("text")
-      .attr("x", 0).attr("y", h + 39).attr("text-anchor", "middle")
-      .attr("font-size", 9).attr("font-weight", 700).attr("fill", color)
-      .text(`${Math.round(pct * 100)}% Full`);
-  }
-
   // Historical cup, left
-  cup(svg.append("g").attr("transform", `translate(${w / 2}, ${topMargin})`), {
+  drawCupShape(svg.append("g").attr("transform", `translate(${w / 2}, ${topMargin})`), {
+    w, h,
     pct: histPct,
     color: GHOST_AMBER,
     dashed: true,
     label: histDate ?? "no data",
-    sub: histVolume != null ? Math.round(histVolume).toLocaleString() : "—",
+    sub: histVolume != null ? Math.round(histVolume).toLocaleString() : "no data",
   });
 
   // Current cup, right
-  cup(svg.append("g").attr("transform", `translate(${w * 1.5 + gap}, ${topMargin})`), {
+  drawCupShape(svg.append("g").attr("transform", `translate(${w * 1.5 + gap}, ${topMargin})`), {
+    w, h,
     pct: currentPct,
-    color: CUP_BLUE_LOCAL,
+    color: CUP_BLUE,
     dashed: false,
     label: "Current",
     sub: `${Math.round(currentStorage).toLocaleString()}/${Math.round(currentCapacity).toLocaleString()}`,
@@ -490,8 +545,6 @@ function drawPairedCup(container, {name, currentPct, currentStorage, currentCapa
     .attr("font-size", 12.5).attr("font-weight", 700).attr("fill", LABEL_NAVY)
     .text(name);
 }
-
-const CUP_BLUE_LOCAL = "#4650e0";
 ```
 
 ```js
