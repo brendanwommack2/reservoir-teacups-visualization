@@ -7,7 +7,7 @@ toc: false
 
 ```js
 // Load reservoir metadata (name, storage, capacity) and the historical volume data
-const histVolume = await FileAttachment("./data/Reservoir-storage-volume.csv").text();
+const histVolumeRaw = await FileAttachment("./data/Reservoir-storage-volume.csv").text();
 const raw = await FileAttachment("./data/reservoirs.csv").text();
 const reservoirMeta = d3.csvParse(raw, d => ({
   id: d.id,
@@ -42,7 +42,7 @@ function forEachCoordinate(geometry, fn) {
 
 // Fits a projection's scale/translate to a set of feature collections by
 // projecting every coordinate and taking the pixel bounding box directly,
-// rather than relying on d3's fitExtent 
+// rather than relying on d3's fitExtent
 function fitProjectionToFeatures(projection, featureCollections, [width, height], padding = 20) {
   projection.scale(1).translate([0, 0]);
 
@@ -186,7 +186,7 @@ class Teacup extends Plot.Mark {
   }
 }
 
-// Sqrt scale so cup AREA (not radius) scales linearly with capacity 
+// Sqrt scale so cup AREA (not radius) scales linearly with capacity
 function makeRScale(data, range = [10, 34]) {
   return d3.scaleSqrt()
     .domain([0, d3.max(data, d => d.capacity)])
@@ -276,4 +276,187 @@ display(mapEl);
 display(htl.html`<p class="page-footer">
   Data through ${reservoirMeta[0]?.date ?? "—"} · USBR RISE, preliminary
 </p>`);
+```
+
+---
+
+## Historical Comparison
+
+```js
+// Parse the full historical series: Location, Date, Volume (see 1-Update-data.R).
+// Location values are already lowercased in the R loader to match reservoirMeta.id.
+const histVolumeRaw = await FileAttachment("./data/Reservoir-storage-volume.csv").text();
+// Location values in the historical CSV don't always match reservoirMeta.id exactly
+// (e.g. reservoirMeta uses "flaming"/"powell", historical CSV uses "flaminggorge"/"lakepowell").
+const idFixups = { flaminggorge: "flaming", lakepowell: "powell" };
+const histVolume = d3.csvParse(histVolumeRaw, d => ({
+  id: idFixups[d.Location] ?? d.Location,
+  date: d.Date, // "YYYY-MM-DD" string — safe to compare/sort lexically
+  volume: d.Volume === "" ? NaN : +d.Volume,
+})).filter(d => !Number.isNaN(d.volume));
+
+// Group by reservoir id, sorted by date, for fast "value on/near date X" lookups
+const histByReservoir = d3.group(histVolume, d => d.id);
+for (const arr of histByReservoir.values()) arr.sort((a, b) => d3.ascending(a.date, b.date));
+
+// Distinct dates across all reservoirs — drives the slider's step positions
+const histDates = Array.from(new Set(histVolume.map(d => d.date))).sort(d3.ascending);
+
+// Given a reservoir id and a target date string, find the closest recorded date <= target
+function findHistoricalRecord(id, targetDate) {
+  const series = histByReservoir.get(id);
+  if (!series || series.length === 0) return null;
+  let lo = 0, hi = series.length - 1, best = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (series[mid].date <= targetDate) { best = series[mid]; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  return best ?? series[0];
+}
+```
+
+```js
+// Native date picker: type a date or use the calendar dropdown. Clamped to the
+// range of dates actually present in the historical data, and snapped to the
+// nearest available date (in case the exact day picked has no record).
+const histDateExtent = [histDates[0], histDates[histDates.length - 1]];
+const defaultHistDate = histDates[Math.max(0, histDates.length - 1 - 365)];
+
+const pickedDate = view(Inputs.date({
+  label: "Compare to date:",
+  value: defaultHistDate,
+  min: histDateExtent[0],
+  max: histDateExtent[1],
+}));
+```
+
+```js
+// Inputs.date yields a Date (or null if cleared) — format to the same
+// "YYYY-MM-DD" string form as histDates, then snap to the nearest available date.
+function nearestHistDate(dateInput) {
+  if (!dateInput) return histDateExtent[1];
+  const target = d3.utcFormat("%Y-%m-%d")(dateInput);
+  const bisect = d3.bisector(d => d).left;
+  const i = bisect(histDates, target);
+  if (i <= 0) return histDates[0];
+  if (i >= histDates.length) return histDates[histDates.length - 1];
+  // Pick whichever neighboring available date is closer to the typed/picked date
+  const before = histDates[i - 1], after = histDates[i];
+  return (target - before <= after - target) ? before : after;
+}
+
+const selectedHistDate = nearestHistDate(pickedDate);
+
+display(htl.html`
+  <div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:#1d3ec1; margin:4px 0 16px; text-align:center;">
+    Historical (amber) — <b>${selectedHistDate}</b> &nbsp;vs&nbsp; Current (blue) — <b>${reservoirMeta[0]?.date ?? "—"}</b>
+  </div>
+`);
+```
+
+```js
+// Small-multiples mark: same trapezoid teacup shape as the map, but drawn
+// as a standalone SVG per reservoir (no geo projection / decluttering needed
+// since these are laid out in a simple grid).
+const GHOST_AMBER = "#c1732c";
+
+function drawPairedCup(container, {name, currentPct, currentStorage, currentCapacity, histPct, histVolume, histDate}) {
+  const w = 90, h = 82, gap = 26;
+  const totalW = w * 2 + gap;
+  const svgHeight = h + 56;
+
+  const svg = d3.select(container)
+    .append("svg")
+    .attr("viewBox", `0 0 ${totalW} ${svgHeight}`)
+    .attr("width", totalW)
+    .attr("height", svgHeight);
+
+  function cup(g, {pct, color, dashed, label, sub}) {
+    const topW = w, botW = w * 0.40;
+    const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
+    const waterH = h * Math.min(1, Math.max(0, pct));
+    const clipId = `clip-${Math.random().toString(36).slice(2)}`;
+
+    g.append("clipPath").attr("id", clipId).append("path").attr("d", cupD);
+    g.append("rect")
+      .attr("x", -w / 2).attr("y", h - waterH).attr("width", w).attr("height", waterH)
+      .attr("fill", color).attr("fill-opacity", dashed ? 0.35 : 1)
+      .attr("clip-path", `url(#${clipId})`);
+    g.append("path")
+      .attr("d", cupD).attr("fill", "none").attr("stroke", color).attr("stroke-width", 1.5)
+      .attr("stroke-dasharray", dashed ? "3,2" : null);
+    g.append("text")
+      .attr("x", 0).attr("y", h + 15).attr("text-anchor", "middle")
+      .attr("font-size", 10).attr("font-weight", 700).attr("fill", color)
+      .text(label);
+    g.append("text")
+      .attr("x", 0).attr("y", h + 27).attr("text-anchor", "middle")
+      .attr("font-size", 9).attr("fill", color)
+      .text(sub);
+    g.append("text")
+      .attr("x", 0).attr("y", h + 39).attr("text-anchor", "middle")
+      .attr("font-size", 9).attr("font-weight", 700).attr("fill", color)
+      .text(`${Math.round(pct * 100)}% Full`);
+  }
+
+  // Historical cup, left
+  cup(svg.append("g").attr("transform", `translate(${w / 2}, 0)`), {
+    pct: histPct,
+    color: GHOST_AMBER,
+    dashed: true,
+    label: histDate ?? "no data",
+    sub: histVolume != null ? Math.round(histVolume).toLocaleString() : "—",
+  });
+
+  // Current cup, right
+  cup(svg.append("g").attr("transform", `translate(${w * 1.5 + gap}, 0)`), {
+    pct: currentPct,
+    color: CUP_BLUE_LOCAL,
+    dashed: false,
+    label: "Current",
+    sub: `${Math.round(currentStorage).toLocaleString()}/${Math.round(currentCapacity).toLocaleString()}`,
+  });
+
+  // Reservoir name header
+  svg.insert("text", ":first-child")
+    .attr("x", totalW / 2).attr("y", -6).attr("text-anchor", "middle")
+    .attr("font-size", 11).attr("font-weight", 700).attr("fill", LABEL_NAVY)
+    .text(name);
+}
+
+const CUP_BLUE_LOCAL = "#4650e0";
+```
+
+```js
+const historicalGrid = (() => {
+  const wrap = document.createElement("div");
+  wrap.style.display = "grid";
+  wrap.style.gridTemplateColumns = "repeat(auto-fill, minmax(240px, 1fr))";
+  wrap.style.gap = "18px 8px";
+  wrap.style.justifyItems = "center";
+  wrap.style.padding = "20px 0 8px";
+  wrap.style.marginTop = "12px";
+
+  for (const meta of reservoirMeta) {
+    const rec = findHistoricalRecord(meta.id, selectedHistDate);
+    const histVol = rec?.volume ?? null;
+    const histPct = histVol != null && meta.capacity > 0 ? Math.min(1, histVol / meta.capacity) : 0;
+    const currentPct = meta.capacity > 0 ? meta.storage / meta.capacity : 0;
+
+    const cell = document.createElement("div");
+    drawPairedCup(cell, {
+      name: meta.name,
+      currentPct,
+      currentStorage: meta.storage,
+      currentCapacity: meta.capacity,
+      histPct,
+      histVolume: histVol,
+      histDate: rec?.date,
+    });
+    wrap.appendChild(cell);
+  }
+  return wrap;
+})();
+display(historicalGrid);
 ```
