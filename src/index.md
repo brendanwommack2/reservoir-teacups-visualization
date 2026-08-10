@@ -92,10 +92,10 @@ function declutterPositions(points, {radius = 60, strength = 0.15, iterations = 
 
 ```js
 display(htl.html`
-  <div style="font-family: monospace; color:#1d3ec1; font-size:12px;">
+  <div class="data-current">
     Data Current as of:<br>${reservoirMeta[0]?.date ?? "—"}
   </div>
-  <h1 style="text-align:center; margin-top:-8px; font-family: Georgia, 'Times New Roman', serif;">Upper Colorado River Drainage Basin</h1>
+  <h1 class="reservoir-title">Upper Colorado River Drainage Basin</h1>
 `);
 ```
 
@@ -299,7 +299,7 @@ const histVolume = d3.csvParse(histVolumeRaw, d => ({
 const histByReservoir = d3.group(histVolume, d => d.id);
 for (const arr of histByReservoir.values()) arr.sort((a, b) => d3.ascending(a.date, b.date));
 
-// Distinct dates across all reservoirs — drives the slider's step positions
+// Distinct dates across all reservoirs — drives both the date picker range and the slider steps
 const histDates = Array.from(new Set(histVolume.map(d => d.date))).sort(d3.ascending);
 
 // Given a reservoir id and a target date string, find the closest recorded date <= target
@@ -317,39 +317,101 @@ function findHistoricalRecord(id, targetDate) {
 ```
 
 ```js
-// Native date picker: type a date or use the calendar dropdown. Clamped to the
-// range of dates actually present in the historical data, and snapped to the
-// nearest available date (in case the exact day picked has no record).
+// Snaps an arbitrary Date (or "YYYY-MM-DD" string) to the nearest date
+// actually present in histDates.
 const histDateExtent = [histDates[0], histDates[histDates.length - 1]];
 const defaultHistDate = histDates[Math.max(0, histDates.length - 1 - 365)];
 
-const pickedDate = view(Inputs.date({
-  label: "Compare to date:",
-  value: defaultHistDate,
-  min: histDateExtent[0],
-  max: histDateExtent[1],
-}));
-```
-
-```js
-// Inputs.date yields a Date (or null if cleared) — format to the same
-// "YYYY-MM-DD" string form as histDates, then snap to the nearest available date.
 function nearestHistDate(dateInput) {
   if (!dateInput) return histDateExtent[1];
-  const target = d3.utcFormat("%Y-%m-%d")(dateInput);
+  const target = typeof dateInput === "string" ? dateInput : d3.utcFormat("%Y-%m-%d")(dateInput);
   const bisect = d3.bisector(d => d).left;
   const i = bisect(histDates, target);
   if (i <= 0) return histDates[0];
   if (i >= histDates.length) return histDates[histDates.length - 1];
-  // Pick whichever neighboring available date is closer to the typed/picked date
+  // Pick whichever neighboring available date is closer to the typed/picked/scrubbed date
   const before = histDates[i - 1], after = histDates[i];
   return (target - before <= after - target) ? before : after;
 }
+```
 
-const selectedHistDate = nearestHistDate(pickedDate);
+```js
+// Combined control: a native date picker + a bare range slider (no numeric
+// spinbox — we skip Inputs.range since it pairs the slider with a raw
+// number field we don't want), both scrubbing the same position in
+// histDates. Either one can drive the other; the emitted value is always
+// a snapped "YYYY-MM-DD" string.
+function historicalDateControl({dates, initial}) {
+  const initialDate = nearestHistDate(initial);
+  const initialIndex = Math.max(0, dates.indexOf(initialDate));
 
+  const dateInput = Inputs.date({
+    value: new Date(`${initialDate}T00:00:00`),
+    min: dates[0],
+    max: dates[dates.length - 1],
+  });
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = 0;
+  slider.max = dates.length - 1;
+  slider.step = 1;
+  slider.value = initialIndex;
+
+  const wrap = document.createElement("div");
+  wrap.className = "hist-date-control";
+
+  const label = document.createElement("span");
+  label.className = "hist-date-label";
+  label.textContent = "Compare to date:";
+
+  wrap.append(label, dateInput, slider);
+
+  let value = initialDate;
+  let syncing = false;
+
+  Object.defineProperty(wrap, "value", {
+    get: () => value,
+    set(v) {
+      value = v;
+      const idx = dates.indexOf(v);
+      if (idx >= 0 && +slider.value !== idx) slider.value = idx;
+      const asDate = new Date(`${v}T00:00:00`);
+      if (+dateInput.value !== +asDate) dateInput.value = asDate;
+    },
+  });
+
+  dateInput.addEventListener("input", (event) => {
+    event.stopPropagation();
+    if (syncing) return;
+    syncing = true;
+    wrap.value = nearestHistDate(dateInput.value);
+    wrap.dispatchEvent(new Event("input", {bubbles: true}));
+    syncing = false;
+  });
+
+  slider.addEventListener("input", (event) => {
+    event.stopPropagation();
+    if (syncing) return;
+    syncing = true;
+    wrap.value = dates[+slider.value];
+    wrap.dispatchEvent(new Event("input", {bubbles: true}));
+    syncing = false;
+  });
+
+  return wrap;
+}
+
+const selectedHistDate = view(historicalDateControl({dates: histDates, initial: defaultHistDate}));
+```
+
+```js
+// Kept in its own cell: `selectedHistDate` above comes from view(), and
+// Framework only resolves that generator to its current value for cells
+// *downstream* of the one that declared it — reading it back in the same
+// cell prints the raw AsyncGenerator object instead of the date string.
 display(htl.html`
-  <div style="font-family:'IBM Plex Mono', monospace; font-size:13px; color:#1d3ec1; margin:4px 0 16px; text-align:center;">
+  <div class="hist-compare-caption">
     Historical (amber) — <b>${selectedHistDate}</b> &nbsp;vs&nbsp; Current (blue) — <b>${reservoirMeta[0]?.date ?? "—"}</b>
   </div>
 `);
@@ -364,7 +426,11 @@ const GHOST_AMBER = "#c1732c";
 function drawPairedCup(container, {name, currentPct, currentStorage, currentCapacity, histPct, histVolume, histDate}) {
   const w = 90, h = 82, gap = 26;
   const totalW = w * 2 + gap;
-  const svgHeight = h + 56;
+  // topMargin makes room for the reservoir-name label above the cups.
+  // (Previously the label was drawn at y="-6", above the viewBox's y=0
+  // origin, so it was silently clipped and never visible.)
+  const topMargin = 20;
+  const svgHeight = h + 56 + topMargin;
 
   const svg = d3.select(container)
     .append("svg")
@@ -401,7 +467,7 @@ function drawPairedCup(container, {name, currentPct, currentStorage, currentCapa
   }
 
   // Historical cup, left
-  cup(svg.append("g").attr("transform", `translate(${w / 2}, 0)`), {
+  cup(svg.append("g").attr("transform", `translate(${w / 2}, ${topMargin})`), {
     pct: histPct,
     color: GHOST_AMBER,
     dashed: true,
@@ -410,7 +476,7 @@ function drawPairedCup(container, {name, currentPct, currentStorage, currentCapa
   });
 
   // Current cup, right
-  cup(svg.append("g").attr("transform", `translate(${w * 1.5 + gap}, 0)`), {
+  cup(svg.append("g").attr("transform", `translate(${w * 1.5 + gap}, ${topMargin})`), {
     pct: currentPct,
     color: CUP_BLUE_LOCAL,
     dashed: false,
@@ -418,10 +484,10 @@ function drawPairedCup(container, {name, currentPct, currentStorage, currentCapa
     sub: `${Math.round(currentStorage).toLocaleString()}/${Math.round(currentCapacity).toLocaleString()}`,
   });
 
-  // Reservoir name header
+  // Reservoir name header sits in the topMargin band, above both cups
   svg.insert("text", ":first-child")
-    .attr("x", totalW / 2).attr("y", -6).attr("text-anchor", "middle")
-    .attr("font-size", 11).attr("font-weight", 700).attr("fill", LABEL_NAVY)
+    .attr("x", totalW / 2).attr("y", topMargin - 6).attr("text-anchor", "middle")
+    .attr("font-size", 12.5).attr("font-weight", 700).attr("fill", LABEL_NAVY)
     .text(name);
 }
 
@@ -431,12 +497,7 @@ const CUP_BLUE_LOCAL = "#4650e0";
 ```js
 const historicalGrid = (() => {
   const wrap = document.createElement("div");
-  wrap.style.display = "grid";
-  wrap.style.gridTemplateColumns = "repeat(auto-fill, minmax(240px, 1fr))";
-  wrap.style.gap = "18px 8px";
-  wrap.style.justifyItems = "center";
-  wrap.style.padding = "20px 0 8px";
-  wrap.style.marginTop = "12px";
+  wrap.className = "historical-grid";
 
   for (const meta of reservoirMeta) {
     const rec = findHistoricalRecord(meta.id, selectedHistDate);
