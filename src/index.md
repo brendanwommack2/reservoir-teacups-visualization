@@ -5,9 +5,77 @@ toc: false
 
 <link rel="stylesheet" href="./styles/App.css">
 
+<style>
+.hist-control-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: 4px 0 10px 0;
+}
+.hist-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1d3ec1;
+  cursor: pointer;
+  user-select: none;
+}
+.hist-toggle-label input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 34px;
+  height: 18px;
+  border-radius: 9px;
+  background: #ccd0f0;
+  position: relative;
+  cursor: pointer;
+  outline: none;
+  transition: background 0.15s ease;
+}
+.hist-toggle-label input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+}
+.hist-toggle-label input[type="checkbox"]:checked {
+  background: #4650e0;
+}
+.hist-toggle-label input[type="checkbox"]:checked::after {
+  left: 18px;
+}
+.hist-date-inputs {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.hist-date-inputs[hidden] {
+  display: none;
+}
+.hist-date-inputs input[type="range"] {
+  width: 200px;
+}
+.hist-compare-caption {
+  font-size: 12.5px;
+  color: #444;
+}
+.hist-compare-caption b {
+  color: inherit;
+}
+</style>
+
 ```js
-// Load reservoir metadata (name, storage, capacity) and the historical volume data
-const histVolumeRaw = await FileAttachment("./data/Reservoir-storage-volume.csv").text();
+// Load reservoir metadata (name, storage, capacity), the historical volume
+// series, and the map geometry, all up front.
 const raw = await FileAttachment("./data/reservoirs.csv").text();
 const reservoirMeta = d3.csvParse(raw, d => ({
   id: d.id,
@@ -17,6 +85,8 @@ const reservoirMeta = d3.csvParse(raw, d => ({
   capacity: +d.capacity,
   pctFull: +d.pctFull,
 }));
+
+const histVolumeRaw = await FileAttachment("./data/Reservoir-storage-volume.csv").text();
 ```
 
 ```js
@@ -76,13 +146,30 @@ function fitProjectionToFeatures(projection, featureCollections, [width, height]
 
 ```js
 // Nudges overlapping cup+label blocks apart (e.g. Fontenelle/Flaming Gorge)
-// using a force simulation: each point springs weakly back toward its true
-// position while a collision force keeps blocks from overlapping.
-function declutterPositions(points, {radius = 60, strength = 0.15, iterations = 300} = {}) {
-  const nodes = points.map(d => ({...d, x0: d.x, y0: d.y}));
+// using a force simulation. Two things pull on each point:
+//   1. A radial "push" that first nudges each point's *target* outward from
+//      the map's center by `pushDist` pixels — so a cup's resting position is
+//      a little off the basin outline near its true spot, rather than
+//      sitting on top of it.
+//   2. forceX/forceY spring each node back toward that pushed target
+//      (not the true position) while forceCollide keeps overlapping cups
+//      from stacking on each other, nudging them further apart as needed.
+// The map's own projection/size is untouched — this only affects where the
+// cups land relative to it. `radius` needs to grow when paired historical
+// cups are showing, since each "point" is then twice as wide.
+function declutterPositions(points, center, {pushDist = 45, radius = 55, strength = 0.2, iterations = 300} = {}) {
+  const nodes = points.map(d => {
+    const dx = d.x - center.x, dy = d.y - center.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const ux = dx / dist, uy = dy / dist;
+    // Target = true position pushed outward along the center->point ray
+    const tx = d.x + ux * pushDist;
+    const ty = d.y + uy * pushDist;
+    return {...d, x0: d.x, y0: d.y, x: tx, y: ty, tx, ty};
+  });
   const sim = d3.forceSimulation(nodes)
-    .force("x", d3.forceX(d => d.x0).strength(strength))
-    .force("y", d3.forceY(d => d.y0).strength(strength))
+    .force("x", d3.forceX(d => d.tx).strength(strength))
+    .force("y", d3.forceY(d => d.ty).strength(strength))
     .force("collide", d3.forceCollide(radius))
     .stop();
   for (let i = 0; i < iterations; i++) sim.tick();
@@ -93,18 +180,15 @@ function declutterPositions(points, {radius = 60, strength = 0.15, iterations = 
 ```js
 // Shared color constants (mirrors --cup-blue / --label-navy / --ghost-amber
 // in App.css). Declared once here so every cup-drawing cell — the map
-// tea-cups, the system-total cup, and the historical paired cups — stays
-// in sync.
+// tea-cups (both single and paired-historical) and the system-total cup —
+// stays in sync.
 const CUP_BLUE = "#4650e0";
 const LABEL_NAVY = "#1d3ec1";
 const GHOST_AMBER = "#c1732c";
 ```
 
 ```js
-// Shared trapezoid "teacup" drawer. Draws a clipped, fillable cup plus its
-// three label lines into an existing <g>. Used by both the system-total
-// cup below and the per-reservoir paired cups in the Historical Comparison
-// section, so there's one definition of what a cup looks like.
+// Shared trapezoid "teacup" drawer, used by the system-total cup.
 function drawCupShape(g, {w, h, pct, color, dashed = false, label, sub}) {
   const topW = w, botW = w * 0.40;
   const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
@@ -131,6 +215,130 @@ function drawCupShape(g, {w, h, pct, color, dashed = false, label, sub}) {
     .attr("x", 0).attr("y", h + 39).attr("text-anchor", "middle")
     .attr("font-size", 9).attr("font-weight", 700).attr("fill", color)
     .text(`${Math.round(pct * 100)}% Full`);
+}
+```
+
+```js
+// Draws a single reservoir tea-cup (non-historical view) directly onto an
+// existing D3 selection — a plain SVG overlay on top of the Plot map, using
+// the same technique as drawCupShape/the system-total cup above. Not a
+// Plot.Mark: it just needs the pixel x/y Plot's own projection already gave
+// us via path.centroid(), so there's no dependency on Plot's channel/scale
+// pipeline at all.
+function drawSingleMapCup(layer, d) {
+  const {x, y, x0, y0, rx, pct, name, storage, capacity} = d;
+  const w = rx * 2;
+  const h = w * 0.92;
+  const topW = w, botW = w * 0.40;
+  const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
+  const waterH = h * Math.min(1, Math.max(0, pct));
+  const displaced = Math.hypot(x - x0, y - y0) > 3;
+  const clipId = `clip-teacup-${Math.random().toString(36).slice(2)}`;
+
+  const g = layer.append("g").attr("class", "reservoir");
+
+  if (displaced) {
+    const leader = g.append("g").attr("class", "leader");
+    leader.append("line")
+      .attr("x1", x0).attr("y1", y0).attr("x2", x).attr("y2", y - h / 2)
+      .attr("stroke", "#8892e6").attr("stroke-width", 1).attr("stroke-dasharray", "2,2");
+    leader.append("circle").attr("cx", x0).attr("cy", y0).attr("r", 2).attr("fill", CUP_BLUE);
+  }
+
+  const node = g.append("g").attr("class", "node").attr("transform", `translate(${x - w / 2}, ${y - h / 2})`);
+  node.append("clipPath").attr("id", clipId).append("path").attr("d", cupD);
+  node.append("rect").attr("class", "cup-water")
+    .attr("x", -w / 2).attr("y", h - waterH).attr("width", w).attr("height", waterH)
+    .attr("fill", CUP_BLUE).attr("clip-path", `url(#${clipId})`);
+  node.append("path").attr("class", "cup-outline").attr("d", cupD)
+    .attr("fill", "none").attr("stroke", CUP_BLUE).attr("stroke-width", 1.5);
+  node.append("text").attr("x", 0).attr("y", h + 15).attr("text-anchor", "middle")
+    .attr("font-size", 11).attr("font-weight", 700).attr("fill", LABEL_NAVY).text(name);
+  node.append("text").attr("x", 0).attr("y", h + 27).attr("text-anchor", "middle")
+    .attr("font-size", 9.5).attr("fill", LABEL_NAVY)
+    .text(`${storage.toLocaleString()}/${capacity.toLocaleString()}`);
+  node.append("text").attr("x", 0).attr("y", h + 39).attr("text-anchor", "middle")
+    .attr("font-size", 9.5).attr("font-weight", 700).attr("fill", LABEL_NAVY)
+    .text(`${Math.round(pct * 100)}% Full`);
+}
+```
+
+```js
+// Draws a PAIRED reservoir tea-cup (historical view): historical (amber,
+// dashed) on the left, current (blue, solid) on the right, sharing one
+// name label above them. Same overlay technique as drawSingleMapCup.
+function drawPairedMapCup(layer, d) {
+  const {x, y, x0, y0, rx, pct, name, storage, capacity, histPct, histVolume} = d;
+  const hasHist = histVolume != null;
+  const clampedHistPct = Math.min(1, Math.max(0, histPct ?? 0));
+  const clampedPct = Math.min(1, Math.max(0, pct));
+
+  const cupW = rx * 1.15;
+  const h = cupW * 0.92;
+  const gap = 5;
+  const topW = cupW, botW = cupW * 0.40;
+  const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
+  const leftDx = -(cupW + gap) / 2;
+  const rightDx = (cupW + gap) / 2;
+  const waterHHist = h * clampedHistPct;
+  const waterHCur = h * clampedPct;
+  const displaced = Math.hypot(x - x0, y - y0) > 3;
+  const rand = Math.random().toString(36).slice(2);
+  const clipIdHist = `clip-teacup-hist-${rand}`;
+  const clipIdCur = `clip-teacup-cur-${rand}`;
+
+  const g = layer.append("g").attr("class", "reservoir reservoir-paired");
+
+  if (displaced) {
+    const leader = g.append("g").attr("class", "leader");
+    leader.append("line")
+      .attr("x1", x0).attr("y1", y0).attr("x2", x).attr("y2", y - h / 2)
+      .attr("stroke", "#8892e6").attr("stroke-width", 1).attr("stroke-dasharray", "2,2");
+    leader.append("circle").attr("cx", x0).attr("cy", y0).attr("r", 2).attr("fill", CUP_BLUE);
+  }
+
+  const pair = g.append("g").attr("class", "node-pair").attr("transform", `translate(${x}, ${y - h / 2})`);
+
+  pair.append("text").attr("x", 0).attr("y", -6).attr("text-anchor", "middle")
+    .attr("font-size", 11).attr("font-weight", 700).attr("fill", LABEL_NAVY).text(name);
+
+  const hist = pair.append("g").attr("class", "node hist").attr("transform", `translate(${leftDx}, 0)`);
+  hist.append("clipPath").attr("id", clipIdHist).append("path").attr("d", cupD);
+  if (hasHist) {
+    hist.append("rect")
+      .attr("x", -cupW / 2).attr("y", h - waterHHist).attr("width", cupW).attr("height", waterHHist)
+      .attr("fill", GHOST_AMBER).attr("fill-opacity", 0.35).attr("clip-path", `url(#${clipIdHist})`);
+  }
+  hist.append("path").attr("d", cupD).attr("fill", "none")
+    .attr("stroke", GHOST_AMBER).attr("stroke-width", 1.5).attr("stroke-dasharray", "3,2");
+  hist.append("text").attr("x", 0).attr("y", h + 14).attr("text-anchor", "middle")
+    .attr("font-size", 8).attr("fill", GHOST_AMBER)
+    .text(hasHist ? Math.round(histVolume).toLocaleString() : "no data");
+  hist.append("text").attr("x", 0).attr("y", h + 25).attr("text-anchor", "middle")
+    .attr("font-size", 8).attr("font-weight", 700).attr("fill", GHOST_AMBER)
+    .text(hasHist ? `${Math.round(clampedHistPct * 100)}%` : "—");
+
+  const cur = pair.append("g").attr("class", "node cur").attr("transform", `translate(${rightDx}, 0)`);
+  cur.append("clipPath").attr("id", clipIdCur).append("path").attr("d", cupD);
+  cur.append("rect")
+    .attr("x", -cupW / 2).attr("y", h - waterHCur).attr("width", cupW).attr("height", waterHCur)
+    .attr("fill", CUP_BLUE).attr("clip-path", `url(#${clipIdCur})`);
+  cur.append("path").attr("d", cupD).attr("fill", "none").attr("stroke", CUP_BLUE).attr("stroke-width", 1.5);
+  cur.append("text").attr("x", 0).attr("y", h + 14).attr("text-anchor", "middle")
+    .attr("font-size", 8).attr("fill", LABEL_NAVY).text(Math.round(storage).toLocaleString());
+  cur.append("text").attr("x", 0).attr("y", h + 25).attr("text-anchor", "middle")
+    .attr("font-size", 8).attr("font-weight", 700).attr("fill", LABEL_NAVY)
+    .text(`${Math.round(clampedPct * 100)}%`);
+}
+```
+
+```js
+// Sqrt scale so cup AREA (not radius) scales linearly with capacity
+function makeRScale(data, range = [10, 34]) {
+  return d3.scaleSqrt()
+    .domain([0, d3.max(data, d => d.capacity)])
+    .range(range)
+    .clamp(true);
 }
 ```
 
@@ -185,189 +393,8 @@ display(htl.html`
 ```
 
 ```js
-// Custom Plot mark: draws each reservoir as a tea-cup shape, filled to
-// reflect % full. rx/ry (sqrt-scaled capacity/storage) control cup SIZE
-// only. Fill level comes from the separate `pct` channel — NOT from rx/ry —
-// since the scale's non-zero range floor ([10, 34]) means rx/ry aren't
-// simple multiples of √capacity/√storage, so their ratio can't be squared
-// back into an accurate percentage.
-class Teacup extends Plot.Mark {
-  static defaults = {fill: CUP_BLUE, stroke: null};
-
-  constructor(data, options = {}) {
-    const {x, y, x0 = x, y0 = y, rx, ry, pct} = options;
-    super(
-      data,
-      {
-        // scale, null means use this value as a literal pixel number
-        x: {value: x, scale: null},
-        y: {value: y, scale: null},
-        x0: {value: x0, scale: null},
-        y0: {value: y0, scale: null},
-        rx: {value: rx, scale: null},
-        ry: {value: ry, scale: null},
-        pct: {value: pct, scale: null},
-      },
-      options,
-      Teacup.defaults
-    );
-  }
-
-  render(indices, scales, channels, dimensions, cxt) {
-    const {x: xs, y: ys, x0: x0s, y0: y0s, rx: rxs, ry: rys, pct: pcts} = channels;
-    const data = this.data;
-
-    return htl.svg`<g>${[...indices].map((i) => {
-      const x = xs[i], y = ys[i];
-      const x0 = x0s[i], y0 = y0s[i];
-      const rx = rxs[i];
-
-      const w = rx * 2;
-      const h = w * 0.92;
-
-      const pct = Math.min(1, Math.max(0, pcts[i]));
-      const waterH = h * pct;
-
-      // Trapezoid cup shape
-      const topW = w, botW = w * 0.40;
-      const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
-
-      // If decluttering moved this point, draw a leader line back to its true position
-      const displaced = Math.hypot(x - x0, y - y0) > 3;
-      const clipId = `clip-teacup-${i}`;
-
-      const d = data[i] ?? {};
-      const name = d.name ?? "";
-      const storage = d.storage ?? 0;
-      const capacity = d.capacity ?? 0;
-
-      return htl.svg`<g class="reservoir">
-        ${displaced
-          ? htl.svg`<g class="leader">
-              <line x1="${x0}" y1="${y0}" x2="${x}" y2="${y - h / 2}"
-                    stroke="#8892e6" stroke-width="1" stroke-dasharray="2,2" />
-              <circle cx="${x0}" cy="${y0}" r="2" fill="${CUP_BLUE}" />
-            </g>`
-          : null}
-        <g class="node" transform="translate(${x - w / 2}, ${y - h / 2})">
-          <clipPath id="${clipId}"><path d="${cupD}" /></clipPath>
-          <rect class="cup-water"
-                x="${-w / 2}" y="${h - waterH}" width="${w}" height="${waterH}"
-                fill="${CUP_BLUE}" clip-path="url(#${clipId})" />
-          <path class="cup-outline" d="${cupD}"
-                fill="none" stroke="${CUP_BLUE}" stroke-width="1.5" />
-          <text x="0" y="${h + 15}" text-anchor="middle"
-                font-size="11" font-weight="700" fill="${LABEL_NAVY}">${name}</text>
-          <text x="0" y="${h + 27}" text-anchor="middle"
-                font-size="9.5" fill="${LABEL_NAVY}">${storage.toLocaleString()}/${capacity.toLocaleString()}</text>
-          <text x="0" y="${h + 39}" text-anchor="middle"
-                font-size="9.5" fill="${LABEL_NAVY}">${Math.round(pct * 100)}% Full</text>
-        </g>
-      </g>`;
-    })}</g>`;
-  }
-}
-
-// Sqrt scale so cup AREA (not radius) scales linearly with capacity
-function makeRScale(data, range = [10, 34]) {
-  return d3.scaleSqrt()
-    .domain([0, d3.max(data, d => d.capacity)])
-    .range(range)
-    .clamp(true);
-}
-```
-
-```js
-const mapEl = resize((width) => {
-  const height = 620;
-  const padding = 20;
-
-  // Fit the projection to the basin outline, then reuse it for everything else
-  // (reservoir centroids, Plot.geo layers) so it all lines up in the same pixel space
-  const projection = d3.geoMercator();
-  fitProjectionToFeatures(projection, [basin], [width, height], padding);
-  const path = d3.geoPath(projection);
-
-  // Join reservoir geometry with metadata (from the csv) by id,
-  // get each reservoir's pixel position via its polygon centroid
-  const reservoirPoints = reservoirShapes.features
-    .map(f => {
-      const meta = reservoirMeta.find(r => r.id === f.properties.id);
-      if (!meta) {
-        console.warn(`No csv match for geojson feature id="${f.properties.id}"`);
-        return null;
-      }
-      const [x, y] = path.centroid(f);
-      return {...meta, x, y};
-    })
-    .filter(Boolean);
-
-  const rScale = makeRScale(reservoirPoints);
-  const declustered = declutterPositions(reservoirPoints).map(d => ({
-    ...d,
-    rx: rScale(d.capacity),
-    ry: rScale(d.storage),
-    pct: d.capacity > 0 ? d.storage / d.capacity : 0,
-  }));
-
-  const plot = Plot.plot({
-    width,
-    height,
-    margin: 0,
-    projection,
-    marks: [
-      // Basin outline
-      Plot.geo(basin.features, {
-        fill: "#ffffff",
-        stroke: "#1a1a1a",
-        strokeWidth: 1.5,
-      }),
-      // Rivers
-      Plot.geo(rivers.features, {
-        fill: "none",
-        stroke: "#5bb8e8",
-        strokeWidth: 1.5,
-      }),
-      // Reservoir waterbody outlines, drawn under the tea-cups
-      Plot.geo(reservoirShapes.features, {
-        fill: "#5bb8e8",
-        fillOpacity: 0.6,
-        stroke: "#1d3ec1",
-        strokeWidth: 1,
-      }),
-      // Tea-cups on top
-      new Teacup(declustered, {x: "x", y: "y", x0: "x0", y0: "y0", rx: "rx", ry: "ry", pct: "pct"}),
-    ],
-  });
-
-  d3.select(plot)
-    .append("text")
-    .attr("x", width / 2)
-    .attr("y", height - 15)
-    .attr("text-anchor", "middle")
-    .attr("font-size", 12)
-    .attr("font-weight", 600)
-    .text("Drainage Area 107,838 Square Miles");
-
-  return plot;
-});
-display(mapEl);
-```
-
-```js
-display(htl.html`<p class="page-footer">
-  Data through ${reservoirMeta[0]?.date ?? "no data"} · USBR RISE, preliminary
-</p>`);
-```
-
----
-
-## Historical Comparison
-
-```js
 // Parse the full historical series: Location, Date, Volume (see 1-Update-data.R).
 // Location values are already lowercased in the R loader to match reservoirMeta.id.
-const histVolumeRaw = await FileAttachment("./data/Reservoir-storage-volume.csv").text();
 // Location values in the historical CSV don't always match reservoirMeta.id exactly
 // (e.g. reservoirMeta uses "flaming"/"powell", historical CSV uses "flaminggorge"/"lakepowell").
 const idFixups = { flaminggorge: "flaming", lakepowell: "powell" };
@@ -418,14 +445,25 @@ function nearestHistDate(dateInput) {
 ```
 
 ```js
-// Combined control: a native date picker + a bare range slider (no numeric
-// spinbox — we skip Inputs.range since it pairs the slider with a raw
-// number field we don't want), both scrubbing the same position in
-// histDates. Either one can drive the other; the emitted value is always
-// a snapped "YYYY-MM-DD" string.
-function historicalDateControl({dates, initial}) {
+// Combined control: an on/off "Historical" toggle plus a native date picker
+// + bare range slider (no numeric spinbox), all bundled into one widget so
+// the toggle state and the selected date travel together as a single
+// reactive value: {enabled, date}. The date/slider stay mounted even while
+// hidden, so scrubbing position isn't lost when the toggle is off.
+function historicalToggleControl({dates, initial}) {
   const initialDate = nearestHistDate(initial);
   const initialIndex = Math.max(0, dates.indexOf(initialDate));
+
+  const wrap = document.createElement("div");
+  wrap.className = "hist-control-row";
+
+  const toggleLabel = document.createElement("label");
+  toggleLabel.className = "hist-toggle-label";
+  const toggleInput = document.createElement("input");
+  toggleInput.type = "checkbox";
+  const toggleText = document.createElement("span");
+  toggleText.textContent = "Historical";
+  toggleLabel.append(toggleInput, toggleText);
 
   const dateInput = Inputs.date({
     value: new Date(`${initialDate}T00:00:00`),
@@ -440,34 +478,49 @@ function historicalDateControl({dates, initial}) {
   slider.step = 1;
   slider.value = initialIndex;
 
-  const wrap = document.createElement("div");
-  wrap.className = "hist-date-control";
+  const dateWrap = document.createElement("div");
+  dateWrap.className = "hist-date-inputs";
+  dateWrap.append(dateInput, slider);
 
-  const label = document.createElement("span");
-  label.className = "hist-date-label";
-  label.textContent = "Compare to date:";
+  const caption = document.createElement("span");
+  caption.className = "hist-compare-caption";
 
-  wrap.append(label, dateInput, slider);
+  wrap.append(toggleLabel, dateWrap, caption);
 
-  let value = initialDate;
+  let value = {enabled: false, date: initialDate};
   let syncing = false;
+
+  function renderCaption() {
+    caption.innerHTML = value.enabled
+      ? `Historical (amber) — <b>${value.date}</b> &nbsp;vs&nbsp; Current (blue) — <b>${reservoirMeta[0]?.date ?? "no data"}</b>`
+      : "";
+  }
 
   Object.defineProperty(wrap, "value", {
     get: () => value,
     set(v) {
       value = v;
-      const idx = dates.indexOf(v);
+      toggleInput.checked = v.enabled;
+      dateWrap.hidden = !v.enabled;
+      const idx = dates.indexOf(v.date);
       if (idx >= 0 && +slider.value !== idx) slider.value = idx;
-      const asDate = new Date(`${v}T00:00:00`);
+      const asDate = new Date(`${v.date}T00:00:00`);
       if (+dateInput.value !== +asDate) dateInput.value = asDate;
+      renderCaption();
     },
+  });
+
+  toggleInput.addEventListener("change", (event) => {
+    event.stopPropagation();
+    wrap.value = {...value, enabled: toggleInput.checked};
+    wrap.dispatchEvent(new Event("input", {bubbles: true}));
   });
 
   dateInput.addEventListener("input", (event) => {
     event.stopPropagation();
     if (syncing) return;
     syncing = true;
-    wrap.value = nearestHistDate(dateInput.value);
+    wrap.value = {...value, date: nearestHistDate(dateInput.value)};
     wrap.dispatchEvent(new Event("input", {bubbles: true}));
     syncing = false;
   });
@@ -476,101 +529,137 @@ function historicalDateControl({dates, initial}) {
     event.stopPropagation();
     if (syncing) return;
     syncing = true;
-    wrap.value = dates[+slider.value];
+    wrap.value = {...value, date: dates[+slider.value]};
     wrap.dispatchEvent(new Event("input", {bubbles: true}));
     syncing = false;
   });
 
+  dateWrap.hidden = !value.enabled;
+  renderCaption();
   return wrap;
 }
 
-const selectedHistDate = view(historicalDateControl({dates: histDates, initial: defaultHistDate}));
+const historicalState = view(historicalToggleControl({dates: histDates, initial: defaultHistDate}));
 ```
 
 ```js
-// Kept in its own cell: `selectedHistDate` above comes from view(), and
+// Kept in its own cell: `historicalState` above comes from view(), and
 // Framework only resolves that generator to its current value for cells
-// *downstream* of the one that declared it — reading it back in the same
-// cell prints the raw AsyncGenerator object instead of the date string.
-display(htl.html`
-  <div class="hist-compare-caption">
-    Historical (amber) — <b>${selectedHistDate}</b> &nbsp;vs&nbsp; Current (blue) — <b>${reservoirMeta[0]?.date ?? "no data"}</b>
-  </div>
-`);
+// *downstream* of the one that declared it.
+const historicalMode = historicalState.enabled;
+const selectedHistDate = historicalState.date;
 ```
 
 ```js
-// Small-multiples mark: same trapezoid teacup shape as the map and the
-// system-total cup, but drawn as a standalone SVG per reservoir (no geo
-// projection / decluttering needed since these are laid out in a simple
-// grid). Uses the shared drawCupShape helper.
-function drawPairedCup(container, {name, currentPct, currentStorage, currentCapacity, histPct, histVolume, histDate}) {
-  const w = 90, h = 82, gap = 26;
-  const totalW = w * 2 + gap;
-  // topMargin makes room for the reservoir-name label above the cups.
-  // (Previously the label was drawn at y="-6", above the viewBox's y=0
-  // origin, so it was silently clipped and never visible.)
-  const topMargin = 20;
-  const svgHeight = h + 56 + topMargin;
+const mapEl = resize((width) => {
+  const height = 620;
+  const padding = 20;
 
-  const svg = d3.select(container)
-    .append("svg")
-    .attr("viewBox", `0 0 ${totalW} ${svgHeight}`)
-    .attr("width", totalW)
-    .attr("height", svgHeight);
+  // Fit the projection to the basin outline, then reuse it for everything else
+  // (reservoir centroids, Plot.geo layers) so it all lines up in the same pixel space.
+  // Untouched from the original layout — the map itself doesn't change size or position.
+  const projection = d3.geoMercator();
+  fitProjectionToFeatures(projection, [basin], [width, height], padding);
+  const path = d3.geoPath(projection);
 
-  // Historical cup, left
-  drawCupShape(svg.append("g").attr("transform", `translate(${w / 2}, ${topMargin})`), {
-    w, h,
-    pct: histPct,
-    color: GHOST_AMBER,
-    dashed: true,
-    label: histDate ?? "no data",
-    sub: histVolume != null ? Math.round(histVolume).toLocaleString() : "no data",
+  // Join reservoir geometry with metadata (from the csv) by id, get each
+  // reservoir's pixel position via its polygon centroid, and — when
+  // historical mode is on — its closest historical record on/before the
+  // selected date.
+  const reservoirPoints = reservoirShapes.features
+    .map(f => {
+      const meta = reservoirMeta.find(r => r.id === f.properties.id);
+      if (!meta) {
+        console.warn(`No csv match for geojson feature id="${f.properties.id}"`);
+        return null;
+      }
+      const [x, y] = path.centroid(f);
+      const rec = historicalMode ? findHistoricalRecord(meta.id, selectedHistDate) : null;
+      return {
+        ...meta,
+        x, y,
+        histVolume: rec?.volume ?? null,
+        histDate: rec?.date ?? null,
+        histPct: rec != null && meta.capacity > 0 ? Math.min(1, rec.volume / meta.capacity) : 0,
+      };
+    })
+    .filter(Boolean);
+
+  const rScale = makeRScale(reservoirPoints);
+
+  // Center used as the origin for the "push outward" direction — the plot's
+  // own center, so cups drift away from the middle of the map toward
+  // whichever edge they're already closest to. Paired cups are roughly
+  // twice as wide as single cups, so they need more push and more collision
+  // radius to stay decluttered.
+  const mapCenter = {x: width / 2, y: height / 2};
+  const declutterOpts = historicalMode
+    ? {pushDist: 14, radius: 78, strength: 0.2, iterations: 300}
+    : {pushDist: 10, radius: 55, strength: 0.2, iterations: 300};
+  const declustered = declutterPositions(reservoirPoints, mapCenter, declutterOpts).map(d => ({
+    ...d,
+    rx: rScale(d.capacity),
+    pct: d.capacity > 0 ? d.storage / d.capacity : 0,
+  }));
+
+  const plot = Plot.plot({
+    width,
+    height,
+    margin: 0,
+    projection,
+    marks: [
+      // Basin outline
+      Plot.geo(basin.features, {
+        fill: "#ffffff",
+        stroke: "#1a1a1a",
+        strokeWidth: 1.5,
+      }),
+      // Rivers
+      Plot.geo(rivers.features, {
+        fill: "none",
+        stroke: "#5bb8e8",
+        strokeWidth: 1.5,
+      }),
+      // Reservoir waterbody outlines, drawn under the tea-cups
+      Plot.geo(reservoirShapes.features, {
+        fill: "#5bb8e8",
+        fillOpacity: 0.6,
+        stroke: "#1d3ec1",
+        strokeWidth: 1,
+      }),
+    ],
   });
 
-  // Current cup, right
-  drawCupShape(svg.append("g").attr("transform", `translate(${w * 1.5 + gap}, ${topMargin})`), {
-    w, h,
-    pct: currentPct,
-    color: CUP_BLUE,
-    dashed: false,
-    label: "Current",
-    sub: `${Math.round(currentStorage).toLocaleString()}/${Math.round(currentCapacity).toLocaleString()}`,
-  });
+  // Tea-cups are drawn as a plain SVG overlay on top of the Plot map,
+  // reusing the pixel positions Plot's own projection already computed
+  // above — not as a Plot mark, so there's nothing in Plot's own
+  // rendering pipeline that can suppress them.
+  const svg = d3.select(plot);
+  const cupsLayer = svg.append("g").attr("class", "teacups-layer");
 
-  // Reservoir name header sits in the topMargin band, above both cups
-  svg.insert("text", ":first-child")
-    .attr("x", totalW / 2).attr("y", topMargin - 6).attr("text-anchor", "middle")
-    .attr("font-size", 12.5).attr("font-weight", 700).attr("fill", LABEL_NAVY)
-    .text(name);
-}
-```
-
-```js
-const historicalGrid = (() => {
-  const wrap = document.createElement("div");
-  wrap.className = "historical-grid";
-
-  for (const meta of reservoirMeta) {
-    const rec = findHistoricalRecord(meta.id, selectedHistDate);
-    const histVol = rec?.volume ?? null;
-    const histPct = histVol != null && meta.capacity > 0 ? Math.min(1, histVol / meta.capacity) : 0;
-    const currentPct = meta.capacity > 0 ? meta.storage / meta.capacity : 0;
-
-    const cell = document.createElement("div");
-    drawPairedCup(cell, {
-      name: meta.name,
-      currentPct,
-      currentStorage: meta.storage,
-      currentCapacity: meta.capacity,
-      histPct,
-      histVolume: histVol,
-      histDate: rec?.date,
-    });
-    wrap.appendChild(cell);
+  for (const d of declustered) {
+    if (historicalMode) {
+      drawPairedMapCup(cupsLayer, d);
+    } else {
+      drawSingleMapCup(cupsLayer, d);
+    }
   }
-  return wrap;
-})();
-display(historicalGrid);
+
+  svg.append("text")
+    .attr("x", width / 2)
+    .attr("y", height - 15)
+    .attr("text-anchor", "middle")
+    .attr("font-size", 12)
+    .attr("font-weight", 600)
+    .text("Drainage Area 107,838 Square Miles");
+
+  return plot;
+});
+display(mapEl);
+```
+
+```js
+display(htl.html`<p class="page-footer">
+  Data through ${reservoirMeta[0]?.date ?? "no data"} · USBR RISE, preliminary
+</p>`);
 ```
