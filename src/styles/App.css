@@ -1,5 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=PT+Serif:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;700&display=swap');
 
+/* ── Design tokens ── */
 :root {
   --cup-blue: #4650e0;
   --label-navy: #1d3ec1;
@@ -7,7 +8,8 @@
 }
 
 /* ── Page background ── */
-body, .observablehq--root {
+body,
+.observablehq--root {
   background: #DADFD5 !important;
 }
 
@@ -15,6 +17,7 @@ body, .observablehq--root {
 /* RESERVOIR TEA-CUPS PAGE                                        */
 /* ────────────────────────────────────────────────────────────── */
 
+/* ── Header ── */
 .header-row {
   display: flex;
   align-items: center;
@@ -42,20 +45,90 @@ body, .observablehq--root {
 
 .data-current {
   font-family: 'IBM Plex Mono', monospace;
-  color: var(--label-navy);
   font-size: 12px;
+  color: var(--label-navy);
 }
 
 .system-stat {
+  margin-top: 0.35rem;
   font-family: 'IBM Plex Mono', monospace;
   font-weight: 700;
   font-size: 15px;
   color: var(--label-navy);
   text-align: center;
-  margin-top: 0.35rem;
 }
 
-/* Historical date picker + slider control */
+/* ── Historical toggle control ── */
+.hist-control-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: 4px 0 10px 0;
+}
+
+/* Toggle switch */
+.hist-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--label-navy);
+  cursor: pointer;
+  user-select: none;
+}
+
+.hist-toggle-label input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 34px;
+  height: 18px;
+  border-radius: 9px;
+  background: #ccd0f0;
+  cursor: pointer;
+  outline: none;
+  transition: background 0.15s ease;
+}
+
+.hist-toggle-label input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  transition: left 0.15s ease;
+}
+
+.hist-toggle-label input[type="checkbox"]:checked {
+  background: var(--cup-blue);
+}
+
+.hist-toggle-label input[type="checkbox"]:checked::after {
+  left: 18px;
+}
+
+/* Date picker + slider (inline toggle control) */
+.hist-date-inputs {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hist-date-inputs[hidden] {
+  display: none;
+}
+
+.hist-date-inputs input[type="range"] {
+  width: 200px;
+}
+
+/* Historical date picker + slider control (standalone variant) */
 .hist-date-control {
   display: flex;
   align-items: center;
@@ -65,24 +138,30 @@ body, .observablehq--root {
   font-size: 13px;
   color: var(--label-navy);
 }
+
 .hist-date-label {
   white-space: nowrap;
 }
+
 .hist-date-control input[type="range"] {
   flex: 1;
   min-width: 160px;
   accent-color: var(--label-navy);
 }
 
+/* Compare caption */
 .hist-compare-caption {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 13px;
-  color: var(--label-navy);
   margin: 4px 0 16px;
+  font-size: 12.5px;
+  color: #444;
   text-align: center;
 }
 
-/* Small-multiples grid of paired historical/current cups */
+.hist-compare-caption b {
+  color: inherit;
+}
+
+/* ── Small-multiples grid of paired historical/current cups ── */
 .historical-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -95,8 +174,8 @@ body, .observablehq--root {
 /* ── Page footer ── */
 .page-footer {
   margin-top: 1.5rem;
-  border-top: 1px solid #E1B9A6;
   padding-top: 0.5rem;
+  border-top: 1px solid #E1B9A6;
   font-family: "PT Serif", Georgia, serif;
   font-size: 10px;
   font-style: italic;

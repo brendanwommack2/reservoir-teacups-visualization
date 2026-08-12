@@ -5,74 +5,6 @@ toc: false
 
 <link rel="stylesheet" href="./styles/App.css">
 
-<style>
-.hist-control-row {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  flex-wrap: wrap;
-  margin: 4px 0 10px 0;
-}
-.hist-toggle-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 13px;
-  font-weight: 700;
-  color: #1d3ec1;
-  cursor: pointer;
-  user-select: none;
-}
-.hist-toggle-label input[type="checkbox"] {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 34px;
-  height: 18px;
-  border-radius: 9px;
-  background: #ccd0f0;
-  position: relative;
-  cursor: pointer;
-  outline: none;
-  transition: background 0.15s ease;
-}
-.hist-toggle-label input[type="checkbox"]::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  transition: left 0.15s ease;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.3);
-}
-.hist-toggle-label input[type="checkbox"]:checked {
-  background: #4650e0;
-}
-.hist-toggle-label input[type="checkbox"]:checked::after {
-  left: 18px;
-}
-.hist-date-inputs {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-}
-.hist-date-inputs[hidden] {
-  display: none;
-}
-.hist-date-inputs input[type="range"] {
-  width: 200px;
-}
-.hist-compare-caption {
-  font-size: 12.5px;
-  color: #444;
-}
-.hist-compare-caption b {
-  color: inherit;
-}
-</style>
-
 ```js
 // Load reservoir metadata (name, storage, capacity), the historical volume
 // series, and the map geometry, all up front.
@@ -112,8 +44,15 @@ function forEachCoordinate(geometry, fn) {
 
 // Fits a projection's scale/translate to a set of feature collections by
 // projecting every coordinate and taking the pixel bounding box directly,
-// rather than relying on d3's fitExtent
+// rather than relying on d3's fitExtent. `padding` can be a single number
+// (uniform on all sides) or a {top, right, bottom, left} object — the
+// latter lets callers reserve extra room on one side (e.g. more space at
+// the bottom for cups/labels) without shrinking the whole map evenly.
 function fitProjectionToFeatures(projection, featureCollections, [width, height], padding = 20) {
+  const pad = typeof padding === "number"
+    ? {top: padding, right: padding, bottom: padding, left: padding}
+    : {top: 20, right: 20, bottom: 20, left: 20, ...padding};
+
   projection.scale(1).translate([0, 0]);
 
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -132,11 +71,12 @@ function fitProjectionToFeatures(projection, featureCollections, [width, height]
   }
 
   const dx = x1 - x0, dy = y1 - y0;
-  const availW = width - 2 * padding, availH = height - 2 * padding;
+  const availW = width - pad.left - pad.right;
+  const availH = height - pad.top - pad.bottom;
   const scale = Math.min(availW / dx, availH / dy);
   const translate = [
-    padding + (availW - scale * dx) / 2 - scale * x0,
-    padding + (availH - scale * dy) / 2 - scale * y0,
+    pad.left + (availW - scale * dx) / 2 - scale * x0,
+    pad.top + (availH - scale * dy) / 2 - scale * y0,
   ];
 
   projection.scale(scale).translate(translate);
@@ -188,7 +128,9 @@ const GHOST_AMBER = "#c1732c";
 ```
 
 ```js
-// Shared trapezoid "teacup" drawer, used by the system-total cup.
+// Shared trapezoid "teacup" drawer, used by the system-total cup. Labels
+// get a white halo (stroke behind fill, via paint-order) so they stay
+// legible over any background, and lines are spaced ~13px apart.
 function drawCupShape(g, {w, h, pct, color, dashed = false, label, sub}) {
   const topW = w, botW = w * 0.40;
   const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
@@ -204,16 +146,19 @@ function drawCupShape(g, {w, h, pct, color, dashed = false, label, sub}) {
     .attr("d", cupD).attr("fill", "none").attr("stroke", color).attr("stroke-width", 1.5)
     .attr("stroke-dasharray", dashed ? "3,2" : null);
   g.append("text")
-    .attr("x", 0).attr("y", h + 15).attr("text-anchor", "middle")
+    .attr("x", 0).attr("y", h + 16).attr("text-anchor", "middle")
     .attr("font-size", 10).attr("font-weight", 700).attr("fill", color)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
     .text(label);
   g.append("text")
-    .attr("x", 0).attr("y", h + 27).attr("text-anchor", "middle")
+    .attr("x", 0).attr("y", h + 29).attr("text-anchor", "middle")
     .attr("font-size", 9).attr("fill", color)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
     .text(sub);
   g.append("text")
-    .attr("x", 0).attr("y", h + 39).attr("text-anchor", "middle")
+    .attr("x", 0).attr("y", h + 42).attr("text-anchor", "middle")
     .attr("font-size", 9).attr("font-weight", 700).attr("fill", color)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
     .text(`${Math.round(pct * 100)}% Full`);
 }
 ```
@@ -224,7 +169,8 @@ function drawCupShape(g, {w, h, pct, color, dashed = false, label, sub}) {
 // the same technique as drawCupShape/the system-total cup above. Not a
 // Plot.Mark: it just needs the pixel x/y Plot's own projection already gave
 // us via path.centroid(), so there's no dependency on Plot's channel/scale
-// pipeline at all.
+// pipeline at all. Labels get a white halo (paint-order stroke) so they
+// stay legible over rivers/basin lines, with ~13px between lines.
 function drawSingleMapCup(layer, d) {
   const {x, y, x0, y0, rx, pct, name, storage, capacity} = d;
   const w = rx * 2;
@@ -252,13 +198,17 @@ function drawSingleMapCup(layer, d) {
     .attr("fill", CUP_BLUE).attr("clip-path", `url(#${clipId})`);
   node.append("path").attr("class", "cup-outline").attr("d", cupD)
     .attr("fill", "none").attr("stroke", CUP_BLUE).attr("stroke-width", 1.5);
-  node.append("text").attr("x", 0).attr("y", h + 15).attr("text-anchor", "middle")
-    .attr("font-size", 11).attr("font-weight", 700).attr("fill", LABEL_NAVY).text(name);
-  node.append("text").attr("x", 0).attr("y", h + 27).attr("text-anchor", "middle")
+  node.append("text").attr("x", 0).attr("y", h + 16).attr("text-anchor", "middle")
+    .attr("font-size", 11).attr("font-weight", 700).attr("fill", LABEL_NAVY)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
+    .text(name);
+  node.append("text").attr("x", 0).attr("y", h + 29).attr("text-anchor", "middle")
     .attr("font-size", 9.5).attr("fill", LABEL_NAVY)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
     .text(`${storage.toLocaleString()}/${capacity.toLocaleString()}`);
-  node.append("text").attr("x", 0).attr("y", h + 39).attr("text-anchor", "middle")
+  node.append("text").attr("x", 0).attr("y", h + 42).attr("text-anchor", "middle")
     .attr("font-size", 9.5).attr("font-weight", 700).attr("fill", LABEL_NAVY)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
     .text(`${Math.round(pct * 100)}% Full`);
 }
 ```
@@ -266,16 +216,17 @@ function drawSingleMapCup(layer, d) {
 ```js
 // Draws a PAIRED reservoir tea-cup (historical view): historical (amber,
 // dashed) on the left, current (blue, solid) on the right, sharing one
-// name label above them. Same overlay technique as drawSingleMapCup.
+// name label above them. Same overlay technique as drawSingleMapCup, same
+// halo/spacing treatment on all text.
 function drawPairedMapCup(layer, d) {
   const {x, y, x0, y0, rx, pct, name, storage, capacity, histPct, histVolume} = d;
   const hasHist = histVolume != null;
   const clampedHistPct = Math.min(1, Math.max(0, histPct ?? 0));
   const clampedPct = Math.min(1, Math.max(0, pct));
 
-  const cupW = rx * 1.15;
+  const cupW = rx * 2;
   const h = cupW * 0.92;
-  const gap = 5;
+  const gap = 10;
   const topW = cupW, botW = cupW * 0.40;
   const cupD = `M ${-topW / 2},0 L ${topW / 2},0 L ${botW / 2},${h} L ${-botW / 2},${h} Z`;
   const leftDx = -(cupW + gap) / 2;
@@ -300,7 +251,9 @@ function drawPairedMapCup(layer, d) {
   const pair = g.append("g").attr("class", "node-pair").attr("transform", `translate(${x}, ${y - h / 2})`);
 
   pair.append("text").attr("x", 0).attr("y", -6).attr("text-anchor", "middle")
-    .attr("font-size", 11).attr("font-weight", 700).attr("fill", LABEL_NAVY).text(name);
+    .attr("font-size", 11).attr("font-weight", 700).attr("fill", LABEL_NAVY)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
+    .text(name);
 
   const hist = pair.append("g").attr("class", "node hist").attr("transform", `translate(${leftDx}, 0)`);
   hist.append("clipPath").attr("id", clipIdHist).append("path").attr("d", cupD);
@@ -311,11 +264,13 @@ function drawPairedMapCup(layer, d) {
   }
   hist.append("path").attr("d", cupD).attr("fill", "none")
     .attr("stroke", GHOST_AMBER).attr("stroke-width", 1.5).attr("stroke-dasharray", "3,2");
-  hist.append("text").attr("x", 0).attr("y", h + 14).attr("text-anchor", "middle")
-    .attr("font-size", 8).attr("fill", GHOST_AMBER)
+  hist.append("text").attr("x", 0).attr("y", h + 15).attr("text-anchor", "middle")
+    .attr("font-size", 9.5).attr("fill", GHOST_AMBER)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
     .text(hasHist ? Math.round(histVolume).toLocaleString() : "no data");
-  hist.append("text").attr("x", 0).attr("y", h + 25).attr("text-anchor", "middle")
-    .attr("font-size", 8).attr("font-weight", 700).attr("fill", GHOST_AMBER)
+  hist.append("text").attr("x", 0).attr("y", h + 28).attr("text-anchor", "middle")
+    .attr("font-size", 9.5).attr("font-weight", 700).attr("fill", GHOST_AMBER)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
     .text(hasHist ? `${Math.round(clampedHistPct * 100)}%` : "—");
 
   const cur = pair.append("g").attr("class", "node cur").attr("transform", `translate(${rightDx}, 0)`);
@@ -324,10 +279,13 @@ function drawPairedMapCup(layer, d) {
     .attr("x", -cupW / 2).attr("y", h - waterHCur).attr("width", cupW).attr("height", waterHCur)
     .attr("fill", CUP_BLUE).attr("clip-path", `url(#${clipIdCur})`);
   cur.append("path").attr("d", cupD).attr("fill", "none").attr("stroke", CUP_BLUE).attr("stroke-width", 1.5);
-  cur.append("text").attr("x", 0).attr("y", h + 14).attr("text-anchor", "middle")
-    .attr("font-size", 8).attr("fill", LABEL_NAVY).text(Math.round(storage).toLocaleString());
-  cur.append("text").attr("x", 0).attr("y", h + 25).attr("text-anchor", "middle")
-    .attr("font-size", 8).attr("font-weight", 700).attr("fill", LABEL_NAVY)
+  cur.append("text").attr("x", 0).attr("y", h + 15).attr("text-anchor", "middle")
+    .attr("font-size", 9.5).attr("fill", LABEL_NAVY)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
+    .text(Math.round(storage).toLocaleString());
+  cur.append("text").attr("x", 0).attr("y", h + 28).attr("text-anchor", "middle")
+    .attr("font-size", 9.5).attr("font-weight", 700).attr("fill", LABEL_NAVY)
+    .attr("stroke", "white").attr("stroke-width", 3).attr("paint-order", "stroke")
     .text(`${Math.round(clampedPct * 100)}%`);
 }
 ```
@@ -462,7 +420,7 @@ function historicalToggleControl({dates, initial}) {
   const toggleInput = document.createElement("input");
   toggleInput.type = "checkbox";
   const toggleText = document.createElement("span");
-  toggleText.textContent = "Historical";
+  toggleText.textContent = "Compare Historic Water Levels";
   toggleLabel.append(toggleInput, toggleText);
 
   const dateInput = Inputs.date({
@@ -552,14 +510,17 @@ const selectedHistDate = historicalState.date;
 
 ```js
 const mapEl = resize((width) => {
-  const height = 620;
-  const padding = 20;
+  const height = 900;
 
-  // Fit the projection to the basin outline, then reuse it for everything else
-  // (reservoir centroids, Plot.geo layers) so it all lines up in the same pixel space.
-  // Untouched from the original layout — the map itself doesn't change size or position.
+  // Fit the projection to the basin outline with generous, asymmetric
+  // padding: a modest margin on top/left/right, but a large bottom margin
+  // (150px) so the basin itself sits higher in the canvas, leaving real
+  // room below it for cups that get pushed downward during decluttering,
+  // plus the "Drainage Area" footer text — none of which should ever
+  // collide with the basin shape or each other.
+  const fitPadding = {top: 24, right: 24, bottom: 150, left: 24};
   const projection = d3.geoMercator();
-  fitProjectionToFeatures(projection, [basin], [width, height], padding);
+  fitProjectionToFeatures(projection, [basin], [width, height], fitPadding);
   const path = d3.geoPath(projection);
 
   // Join reservoir geometry with metadata (from the csv) by id, get each
@@ -585,19 +546,28 @@ const mapEl = resize((width) => {
     })
     .filter(Boolean);
 
-  const rScale = makeRScale(reservoirPoints);
+  const rScale = makeRScale(reservoirPoints, [14, 46]);
 
   // Center used as the origin for the "push outward" direction — the plot's
   // own center, so cups drift away from the middle of the map toward
-  // whichever edge they're already closest to. Paired cups are roughly
-  // twice as wide as single cups, so they need more push and more collision
-  // radius to stay decluttered.
+  // whichever edge they're already closest to. Paired cups are drawn at
+  // full single-cup width (two side by side), so their combined footprint
+  // is roughly double a single cup's — push/radius scaled up accordingly.
   const mapCenter = {x: width / 2, y: height / 2};
   const declutterOpts = historicalMode
-    ? {pushDist: 14, radius: 78, strength: 0.2, iterations: 300}
-    : {pushDist: 10, radius: 55, strength: 0.2, iterations: 300};
+    ? {pushDist: 26, radius: 132, strength: 0.25, iterations: 400}
+    : {pushDist: 18, radius: 68, strength: 0.25, iterations: 400};
+
+  // Safety clamp: whatever the force simulation decides, no cup's center
+  // should end up closer to an edge than `edgeMargin` px, or below
+  // `bottomReserve` px from the bottom (leaves room for the cup's own
+  // label stack below it, plus the footer text under that).
+  const edgeMargin = 60;
+  const bottomReserve = 110;
   const declustered = declutterPositions(reservoirPoints, mapCenter, declutterOpts).map(d => ({
     ...d,
+    x: Math.min(Math.max(d.x, edgeMargin), width - edgeMargin),
+    y: Math.min(Math.max(d.y, edgeMargin), height - bottomReserve),
     rx: rScale(d.capacity),
     pct: d.capacity > 0 ? d.storage / d.capacity : 0,
   }));
