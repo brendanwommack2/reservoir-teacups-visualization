@@ -496,16 +496,17 @@ function historicalToggleControl({dates, initial}) {
   renderCaption();
   return wrap;
 }
-
-const historicalState = view(historicalToggleControl({dates: histDates, initial: defaultHistDate}));
 ```
 
 ```js
-// Kept in its own cell: `historicalState` above comes from view(), and
-// Framework only resolves that generator to its current value for cells
-// *downstream* of the one that declared it.
-const historicalMode = historicalState.enabled;
-const selectedHistDate = historicalState.date;
+// The widget's raw DOM element, kept as its own plain (non-viewof) variable.
+// This is the key to fixing the scroll-jump bug below: because the big map
+// cell reads state from this element imperatively (via `.value` inside an
+// event listener) instead of depending on a reactive `viewof` variable,
+// dragging the slider no longer causes Framework to recompute and replace
+// the entire map cell — it only ever touches the small cups layer.
+const historicalControlEl = historicalToggleControl({dates: histDates, initial: defaultHistDate});
+const historicalState = view(historicalControlEl);
 ```
 
 ```js
@@ -522,55 +523,6 @@ const mapEl = resize((width) => {
   const projection = d3.geoMercator();
   fitProjectionToFeatures(projection, [basin], [width, height], fitPadding);
   const path = d3.geoPath(projection);
-
-  // Join reservoir geometry with metadata (from the csv) by id, get each
-  // reservoir's pixel position via its polygon centroid, and — when
-  // historical mode is on — its closest historical record on/before the
-  // selected date.
-  const reservoirPoints = reservoirShapes.features
-    .map(f => {
-      const meta = reservoirMeta.find(r => r.id === f.properties.id);
-      if (!meta) {
-        console.warn(`No csv match for geojson feature id="${f.properties.id}"`);
-        return null;
-      }
-      const [x, y] = path.centroid(f);
-      const rec = historicalMode ? findHistoricalRecord(meta.id, selectedHistDate) : null;
-      return {
-        ...meta,
-        x, y,
-        histVolume: rec?.volume ?? null,
-        histDate: rec?.date ?? null,
-        histPct: rec != null && meta.capacity > 0 ? Math.min(1, rec.volume / meta.capacity) : 0,
-      };
-    })
-    .filter(Boolean);
-
-  const rScale = makeRScale(reservoirPoints, [14, 46]);
-
-  // Center used as the origin for the "push outward" direction — the plot's
-  // own center, so cups drift away from the middle of the map toward
-  // whichever edge they're already closest to. Paired cups are drawn at
-  // full single-cup width (two side by side), so their combined footprint
-  // is roughly double a single cup's — push/radius scaled up accordingly.
-  const mapCenter = {x: width / 2, y: height / 2};
-  const declutterOpts = historicalMode
-    ? {pushDist: 26, radius: 132, strength: 0.25, iterations: 400}
-    : {pushDist: 18, radius: 68, strength: 0.25, iterations: 400};
-
-  // Safety clamp: whatever the force simulation decides, no cup's center
-  // should end up closer to an edge than `edgeMargin` px, or below
-  // `bottomReserve` px from the bottom (leaves room for the cup's own
-  // label stack below it, plus the footer text under that).
-  const edgeMargin = 60;
-  const bottomReserve = 110;
-  const declustered = declutterPositions(reservoirPoints, mapCenter, declutterOpts).map(d => ({
-    ...d,
-    x: Math.min(Math.max(d.x, edgeMargin), width - edgeMargin),
-    y: Math.min(Math.max(d.y, edgeMargin), height - bottomReserve),
-    rx: rScale(d.capacity),
-    pct: d.capacity > 0 ? d.storage / d.capacity : 0,
-  }));
 
   const plot = Plot.plot({
     width,
@@ -607,13 +559,90 @@ const mapEl = resize((width) => {
   const svg = d3.select(plot);
   const cupsLayer = svg.append("g").attr("class", "teacups-layer");
 
-  for (const d of declustered) {
-    if (historicalMode) {
-      drawPairedMapCup(cupsLayer, d);
-    } else {
-      drawSingleMapCup(cupsLayer, d);
+  // Pre-join reservoir geometry with metadata once — this part never
+  // changes when the historical toggle/slider moves, only the historical
+  // lookup + declutter pass below does.
+  const baseReservoirPoints = reservoirShapes.features
+    .map(f => {
+      const meta = reservoirMeta.find(r => r.id === f.properties.id);
+      if (!meta) {
+        console.warn(`No csv match for geojson feature id="${f.properties.id}"`);
+        return null;
+      }
+      const [x, y] = path.centroid(f);
+      return {...meta, x, y};
+    })
+    .filter(Boolean);
+
+  const rScale = makeRScale(baseReservoirPoints, [14, 46]);
+
+  // Center used as the origin for the "push outward" direction — the plot's
+  // own center, so cups drift away from the middle of the map toward
+  // whichever edge they're already closest to. Paired cups are drawn at
+  // full single-cup width (two side by side), so their combined footprint
+  // is roughly double a single cup's — push/radius scaled up accordingly.
+  const mapCenter = {x: width / 2, y: height / 2};
+
+  // Safety clamp: whatever the force simulation decides, no cup's center
+  // should end up closer to an edge than `edgeMargin` px, or below
+  // `bottomReserve` px from the bottom (leaves room for the cup's own
+  // label stack below it, plus the footer text under that).
+  const edgeMargin = 60;
+  const bottomReserve = 110;
+
+  // Redraws only the cups layer for a given {enabled, date} state — this
+  // is what actually runs on every toggle flip / slider drag / date pick.
+  // It never touches the basin/rivers/reservoir-outline marks above, so the
+  // browser never has to replace the big map DOM subtree, and the page's
+  // scroll position stays put.
+  function redrawCups({enabled: historicalMode, date: selectedHistDate}) {
+    const reservoirPoints = baseReservoirPoints.map(meta => {
+      const rec = historicalMode ? findHistoricalRecord(meta.id, selectedHistDate) : null;
+      return {
+        ...meta,
+        histVolume: rec?.volume ?? null,
+        histDate: rec?.date ?? null,
+        histPct: rec != null && meta.capacity > 0 ? Math.min(1, rec.volume / meta.capacity) : 0,
+      };
+    });
+
+    const declutterOpts = historicalMode
+      ? {pushDist: 26, radius: 132, strength: 0.25, iterations: 400}
+      : {pushDist: 18, radius: 68, strength: 0.25, iterations: 400};
+
+    const declustered = declutterPositions(reservoirPoints, mapCenter, declutterOpts).map(d => ({
+      ...d,
+      x: Math.min(Math.max(d.x, edgeMargin), width - edgeMargin),
+      y: Math.min(Math.max(d.y, edgeMargin), height - bottomReserve),
+      rx: rScale(d.capacity),
+      pct: d.capacity > 0 ? d.storage / d.capacity : 0,
+    }));
+
+    cupsLayer.selectAll("*").remove();
+    for (const d of declustered) {
+      if (historicalMode) {
+        drawPairedMapCup(cupsLayer, d);
+      } else {
+        drawSingleMapCup(cupsLayer, d);
+      }
     }
   }
+
+  // Initial paint, using whatever the control's current value is right now
+  // (read imperatively off the element, not off a reactive Framework var).
+  redrawCups(historicalControlEl.value);
+
+  // From here on, every toggle/date/slider interaction just calls
+  // redrawCups directly — no cell rerun, no DOM replacement, no scroll jump.
+  const onHistoricalInput = () => redrawCups(historicalControlEl.value);
+  historicalControlEl.addEventListener("input", onHistoricalInput);
+
+  // This cell does still rerun on actual window resizes (that's the whole
+  // point of `resize()`), which recreates the map and would otherwise pile
+  // up duplicate listeners on historicalControlEl each time. `invalidation`
+  // is Framework's built-in per-run cleanup hook — use it to remove the
+  // listener we just added whenever this cell reruns or is torn down.
+  invalidation.then(() => historicalControlEl.removeEventListener("input", onHistoricalInput));
 
   svg.append("text")
     .attr("x", width / 2)
