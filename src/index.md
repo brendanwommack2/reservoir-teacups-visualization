@@ -118,13 +118,27 @@ function declutterPositions(points, center, {pushDist = 45, radius = 55, strengt
 ```
 
 ```js
-// Shared color constants (mirrors --cup-blue / --label-navy / --ghost-amber
-// in App.css). Declared once here so every cup-drawing cell — the map
-// tea-cups (both single and paired-historical) and the system-total cup —
-// stays in sync.
-const CUP_BLUE = "#4650e0";
-const LABEL_NAVY = "#1d3ec1";
-const GHOST_AMBER = "#c1732c";
+// Reads a CSS custom property's live value off :root, so App.css is the
+// single source of truth for color — nothing in this file hardcodes a hex
+// value. Falls back to `fallback` if the variable isn't set (e.g. running
+// before stylesheets have loaded).
+function cssVar(name, fallback = "#000000") {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+// Shared color constants, read once from App.css's :root custom properties.
+// Declared once here so every cup-drawing cell — the map tea-cups (both
+// single and paired-historical) and the system-total cup — stays in sync,
+// and so a designer can change every color on the page by editing App.css
+// alone, without touching this file.
+const CUP_BLUE = cssVar("--water-teal", "#2C6E76");
+const LABEL_NAVY = cssVar("--ink-navy", "#1B2A44");
+const GHOST_AMBER = cssVar("--clay-amber", "#A85C2E");
+const BASIN_FILL = cssVar("--paper-panel", "#FBFAF5");
+const RIVER_STROKE = cssVar("--river-blue", "#6FA3AA");
+const RESERVOIR_FILL = cssVar("--river-blue", "#6FA3AA");
+const LEADER_STROKE = cssVar("--leader-line", "#8892e6");
 ```
 
 ```js
@@ -187,7 +201,7 @@ function drawSingleMapCup(layer, d) {
     const leader = g.append("g").attr("class", "leader");
     leader.append("line")
       .attr("x1", x0).attr("y1", y0).attr("x2", x).attr("y2", y - h / 2)
-      .attr("stroke", "#8892e6").attr("stroke-width", 1).attr("stroke-dasharray", "2,2");
+      .attr("stroke", LEADER_STROKE).attr("stroke-width", 1).attr("stroke-dasharray", "2,2");
     leader.append("circle").attr("cx", x0).attr("cy", y0).attr("r", 2).attr("fill", CUP_BLUE);
   }
 
@@ -215,7 +229,7 @@ function drawSingleMapCup(layer, d) {
 
 ```js
 // Draws a PAIRED reservoir tea-cup (historical view): historical (amber,
-// dashed) on the left, current (blue, solid) on the right, sharing one
+// dashed) on the left, current (teal, solid) on the right, sharing one
 // name label above them. Same overlay technique as drawSingleMapCup, same
 // halo/spacing treatment on all text.
 function drawPairedMapCup(layer, d) {
@@ -244,7 +258,7 @@ function drawPairedMapCup(layer, d) {
     const leader = g.append("g").attr("class", "leader");
     leader.append("line")
       .attr("x1", x0).attr("y1", y0).attr("x2", x).attr("y2", y - h / 2)
-      .attr("stroke", "#8892e6").attr("stroke-width", 1).attr("stroke-dasharray", "2,2");
+      .attr("stroke", LEADER_STROKE).attr("stroke-width", 1).attr("stroke-dasharray", "2,2");
     leader.append("circle").attr("cx", x0).attr("cy", y0).attr("r", 2).attr("fill", CUP_BLUE);
   }
 
@@ -345,7 +359,7 @@ display(htl.html`
       <h1 class="reservoir-title">Upper Colorado River Drainage Basin</h1>
       <div class="system-stat">${formatAcFt(totalStorage)} / ${formatAcFt(totalCapacity)} ac-ft &nbsp;—&nbsp; ${Math.round(systemPct * 100)}% Full System-Wide</div>
     </div>
-    <div class="header-right">${systemCupEl}</div>
+    <div class="header-right"><div class="system-cup-frame">${systemCupEl}</div></div>
   </div>
 `);
 ```
@@ -443,7 +457,7 @@ function historicalToggleControl({dates, initial}) {
   const toggleInput = document.createElement("input");
   toggleInput.type = "checkbox";
   const toggleText = document.createElement("span");
-  toggleText.textContent = "Compare Historic Water Levels";
+  toggleText.textContent = "Compare historic water levels";
   toggleLabel.append(toggleInput, toggleText);
 
   const dateInput = Inputs.date({
@@ -458,20 +472,23 @@ function historicalToggleControl({dates, initial}) {
   slider.max = dates.length - 1;
   slider.step = 1;
   slider.value = initialIndex;
+  slider.className = "hist-slider";
 
-  const dateWrap = document.createElement("div");
-  dateWrap.className = "hist-date-inputs";
-  dateWrap.append(dateInput, slider);
+  const sliderWrap = document.createElement("div");
+  sliderWrap.className = "hist-slider-wrap";
+  sliderWrap.append(dateInput, slider);
 
-  // Step buttons: back/forward by day, month, and year. Grouped as three
-  // [«][»] pairs so it reads left-to-right as "coarser to finer" or vice
-  // versa depending on preference — here: Year, Month, Day.
-  function makeStepButton(unit, direction, label, title) {
+  // Step buttons: back/forward by day, month, and year, each rendered as
+  // its own labeled segmented-control group (label on top, ‹ › below) so
+  // three units of navigation stay legible side by side instead of
+  // crowding into one line of text.
+  function makeStepButton(unit, direction, glyph, title) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "hist-step-btn";
-    btn.textContent = label;
+    btn.textContent = glyph;
     btn.title = title;
+    btn.setAttribute("aria-label", title);
     btn.addEventListener("click", (event) => {
       event.stopPropagation();
       wrap.value = {...value, date: stepHistDate(value.date, unit, direction)};
@@ -480,41 +497,33 @@ function historicalToggleControl({dates, initial}) {
     return btn;
   }
 
+  function makeStepGroup(unit, labelText) {
+    const group = document.createElement("div");
+    group.className = "hist-step-group";
+    const label = document.createElement("span");
+    label.className = "hist-step-group-label";
+    label.textContent = labelText;
+    const buttons = document.createElement("div");
+    buttons.className = "hist-step-group-buttons";
+    buttons.append(
+      makeStepButton(unit, -1, "‹", `Back 1 ${labelText.toLowerCase()}`),
+      makeStepButton(unit, 1, "›", `Forward 1 ${labelText.toLowerCase()}`),
+    );
+    group.append(label, buttons);
+    return group;
+  }
+
   const stepWrap = document.createElement("div");
   stepWrap.className = "hist-step-buttons";
-
-  const yearGroup = document.createElement("span");
-  yearGroup.className = "hist-step-group";
-  yearGroup.append(
-    makeStepButton("year", -1, "«", "Back 1 year"),
-    document.createElement("span"),
-    makeStepButton("year", 1, "»", "Forward 1 year"),
+  stepWrap.append(
+    makeStepGroup("year", "Year"),
+    makeStepGroup("month", "Month"),
+    makeStepGroup("day", "Day"),
   );
-  yearGroup.querySelector("span:nth-child(2)").textContent = "Year";
-  yearGroup.querySelector("span:nth-child(2)").className = "hist-step-group-label";
 
-  const monthGroup = document.createElement("span");
-  monthGroup.className = "hist-step-group";
-  monthGroup.append(
-    makeStepButton("month", -1, "‹", "Back 1 month"),
-    document.createElement("span"),
-    makeStepButton("month", 1, "›", "Forward 1 month"),
-  );
-  monthGroup.querySelector("span:nth-child(2)").textContent = "Month";
-  monthGroup.querySelector("span:nth-child(2)").className = "hist-step-group-label";
-
-  const dayGroup = document.createElement("span");
-  dayGroup.className = "hist-step-group";
-  dayGroup.append(
-    makeStepButton("day", -1, "‹", "Back 1 day"),
-    document.createElement("span"),
-    makeStepButton("day", 1, "›", "Forward 1 day"),
-  );
-  dayGroup.querySelector("span:nth-child(2)").textContent = "Day";
-  dayGroup.querySelector("span:nth-child(2)").className = "hist-step-group-label";
-
-  stepWrap.append(yearGroup, monthGroup, dayGroup);
-  dateWrap.append(stepWrap);
+  const dateWrap = document.createElement("div");
+  dateWrap.className = "hist-date-inputs";
+  dateWrap.append(sliderWrap, stepWrap);
 
   const caption = document.createElement("span");
   caption.className = "hist-compare-caption";
@@ -526,7 +535,7 @@ function historicalToggleControl({dates, initial}) {
 
   function renderCaption() {
     caption.innerHTML = value.enabled
-      ? `Historical (amber) — <b>${value.date}</b> &nbsp;vs&nbsp; Current (blue) — <b>${reservoirMeta[0]?.date ?? "no data"}</b>`
+      ? `<span class="hist-tag hist-tag-amber">Historical</span> ${value.date} &nbsp;vs&nbsp; <span class="hist-tag hist-tag-teal">Current</span> ${reservoirMeta[0]?.date ?? "no data"}`
       : "";
   }
 
@@ -607,23 +616,23 @@ const mapEl = resize((width) => {
     margin: 0,
     projection,
     marks: [
-      // Basin outline
+      // Basin outline — fill/stroke read from :root custom properties
       Plot.geo(basin.features, {
-        fill: "#ffffff",
-        stroke: "#1a1a1a",
+        fill: BASIN_FILL,
+        stroke: LABEL_NAVY,
         strokeWidth: 1.5,
       }),
       // Rivers
       Plot.geo(rivers.features, {
         fill: "none",
-        stroke: "#5bb8e8",
+        stroke: RIVER_STROKE,
         strokeWidth: 1.5,
       }),
       // Reservoir waterbody outlines, drawn under the tea-cups
       Plot.geo(reservoirShapes.features, {
-        fill: "#5bb8e8",
-        fillOpacity: 0.6,
-        stroke: "#1d3ec1",
+        fill: RESERVOIR_FILL,
+        fillOpacity: 0.55,
+        stroke: LABEL_NAVY,
         strokeWidth: 1,
       }),
     ],
@@ -715,8 +724,7 @@ const mapEl = resize((width) => {
   const onHistoricalInput = () => redrawCups(historicalControlEl.value);
   historicalControlEl.addEventListener("input", onHistoricalInput);
 
-  // This cell does still rerun on actual window resizes (that's the whole
-  // point of `resize()`), which recreates the map and would otherwise pile
+  // This cell reruns on actual window resizes, which recreates the map and would otherwise pile
   // up duplicate listeners on historicalControlEl each time. `invalidation`
   // is Framework's built-in per-run cleanup hook — use it to remove the
   // listener we just added whenever this cell reruns or is torn down.
