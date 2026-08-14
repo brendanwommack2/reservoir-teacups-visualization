@@ -400,14 +400,37 @@ function nearestHistDate(dateInput) {
   const before = histDates[i - 1], after = histDates[i];
   return (target - before <= after - target) ? before : after;
 }
+
+// Formats a Date as a local "YYYY-MM-DD" string (avoids UTC-offset drift
+// that d3.utcFormat can introduce when stepping local calendar units).
+function formatLocalDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// Steps a "YYYY-MM-DD" date string forward/back by whole calendar
+// day/month/year units, then snaps the result onto the nearest date that
+// actually exists in histDates (so a step never lands on a gap and the
+// buttons always produce a *different* available date when one exists on
+// that side).
+function stepHistDate(dateStr, unit, direction) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  if (unit === "day") d.setDate(d.getDate() + direction);
+  else if (unit === "month") d.setMonth(d.getMonth() + direction);
+  else if (unit === "year") d.setFullYear(d.getFullYear() + direction);
+  return nearestHistDate(formatLocalDate(d));
+}
 ```
 
 ```js
-// Combined control: an on/off "Historical" toggle plus a native date picker
-// + bare range slider (no numeric spinbox), all bundled into one widget so
-// the toggle state and the selected date travel together as a single
-// reactive value: {enabled, date}. The date/slider stay mounted even while
-// hidden, so scrubbing position isn't lost when the toggle is off.
+// Combined control: an on/off "Historical" toggle, a native date picker,
+// a bare range slider, and day/month/year step buttons — all bundled into
+// one widget so the toggle state and the selected date travel together as
+// a single reactive value: {enabled, date}. The date/slider/buttons stay
+// mounted even while hidden, so scrubbing position isn't lost when the
+// toggle is off.
 function historicalToggleControl({dates, initial}) {
   const initialDate = nearestHistDate(initial);
   const initialIndex = Math.max(0, dates.indexOf(initialDate));
@@ -439,6 +462,59 @@ function historicalToggleControl({dates, initial}) {
   const dateWrap = document.createElement("div");
   dateWrap.className = "hist-date-inputs";
   dateWrap.append(dateInput, slider);
+
+  // Step buttons: back/forward by day, month, and year. Grouped as three
+  // [«][»] pairs so it reads left-to-right as "coarser to finer" or vice
+  // versa depending on preference — here: Year, Month, Day.
+  function makeStepButton(unit, direction, label, title) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "hist-step-btn";
+    btn.textContent = label;
+    btn.title = title;
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      wrap.value = {...value, date: stepHistDate(value.date, unit, direction)};
+      wrap.dispatchEvent(new Event("input", {bubbles: true}));
+    });
+    return btn;
+  }
+
+  const stepWrap = document.createElement("div");
+  stepWrap.className = "hist-step-buttons";
+
+  const yearGroup = document.createElement("span");
+  yearGroup.className = "hist-step-group";
+  yearGroup.append(
+    makeStepButton("year", -1, "«", "Back 1 year"),
+    document.createElement("span"),
+    makeStepButton("year", 1, "»", "Forward 1 year"),
+  );
+  yearGroup.querySelector("span:nth-child(2)").textContent = "Year";
+  yearGroup.querySelector("span:nth-child(2)").className = "hist-step-group-label";
+
+  const monthGroup = document.createElement("span");
+  monthGroup.className = "hist-step-group";
+  monthGroup.append(
+    makeStepButton("month", -1, "‹", "Back 1 month"),
+    document.createElement("span"),
+    makeStepButton("month", 1, "›", "Forward 1 month"),
+  );
+  monthGroup.querySelector("span:nth-child(2)").textContent = "Month";
+  monthGroup.querySelector("span:nth-child(2)").className = "hist-step-group-label";
+
+  const dayGroup = document.createElement("span");
+  dayGroup.className = "hist-step-group";
+  dayGroup.append(
+    makeStepButton("day", -1, "‹", "Back 1 day"),
+    document.createElement("span"),
+    makeStepButton("day", 1, "›", "Forward 1 day"),
+  );
+  dayGroup.querySelector("span:nth-child(2)").textContent = "Day";
+  dayGroup.querySelector("span:nth-child(2)").className = "hist-step-group-label";
+
+  stepWrap.append(yearGroup, monthGroup, dayGroup);
+  dateWrap.append(stepWrap);
 
   const caption = document.createElement("span");
   caption.className = "hist-compare-caption";
@@ -503,8 +579,9 @@ function historicalToggleControl({dates, initial}) {
 // This is the key to fixing the scroll-jump bug below: because the big map
 // cell reads state from this element imperatively (via `.value` inside an
 // event listener) instead of depending on a reactive `viewof` variable,
-// dragging the slider no longer causes Framework to recompute and replace
-// the entire map cell — it only ever touches the small cups layer.
+// dragging the slider (or clicking a step button) no longer causes
+// Framework to recompute and replace the entire map cell — it only ever
+// touches the small cups layer.
 const historicalControlEl = historicalToggleControl({dates: histDates, initial: defaultHistDate});
 const historicalState = view(historicalControlEl);
 ```
@@ -560,8 +637,8 @@ const mapEl = resize((width) => {
   const cupsLayer = svg.append("g").attr("class", "teacups-layer");
 
   // Pre-join reservoir geometry with metadata once — this part never
-  // changes when the historical toggle/slider moves, only the historical
-  // lookup + declutter pass below does.
+  // changes when the historical toggle/slider/step-buttons move, only the
+  // historical lookup + declutter pass below does.
   const baseReservoirPoints = reservoirShapes.features
     .map(f => {
       const meta = reservoirMeta.find(r => r.id === f.properties.id);
@@ -591,10 +668,10 @@ const mapEl = resize((width) => {
   const bottomReserve = 110;
 
   // Redraws only the cups layer for a given {enabled, date} state — this
-  // is what actually runs on every toggle flip / slider drag / date pick.
-  // It never touches the basin/rivers/reservoir-outline marks above, so the
-  // browser never has to replace the big map DOM subtree, and the page's
-  // scroll position stays put.
+  // is what actually runs on every toggle flip / slider drag / date pick /
+  // step-button click. It never touches the basin/rivers/reservoir-outline
+  // marks above, so the browser never has to replace the big map DOM
+  // subtree, and the page's scroll position stays put.
   function redrawCups({enabled: historicalMode, date: selectedHistDate}) {
     const reservoirPoints = baseReservoirPoints.map(meta => {
       const rec = historicalMode ? findHistoricalRecord(meta.id, selectedHistDate) : null;
@@ -632,8 +709,9 @@ const mapEl = resize((width) => {
   // (read imperatively off the element, not off a reactive Framework var).
   redrawCups(historicalControlEl.value);
 
-  // From here on, every toggle/date/slider interaction just calls
-  // redrawCups directly — no cell rerun, no DOM replacement, no scroll jump.
+  // From here on, every toggle/date/slider/step-button interaction just
+  // calls redrawCups directly — no cell rerun, no DOM replacement, no
+  // scroll jump.
   const onHistoricalInput = () => redrawCups(historicalControlEl.value);
   historicalControlEl.addEventListener("input", onHistoricalInput);
 
